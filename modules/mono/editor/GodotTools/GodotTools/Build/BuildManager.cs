@@ -293,7 +293,8 @@ namespace GodotTools.Build
             string platform,
             string runtimeIdentifier,
             string publishOutputDir,
-            bool includeDebugSymbols = true
+            bool includeDebugSymbols = true,
+            IEnumerable<string>? customProperties = null
         )
         {
             var buildInfo = new BuildInfo(GodotSharpDirs.ProjectSlnPath, GodotSharpDirs.ProjectCsProjPath, configuration,
@@ -310,6 +311,12 @@ namespace GodotTools.Build
             if (Internal.GodotIsRealTDouble())
                 buildInfo.CustomProperties.Add("GodotFloat64=true");
 
+            if (customProperties != null)
+            {
+                foreach (string customProperty in customProperties)
+                    buildInfo.CustomProperties.Add(customProperty);
+            }
+
             return buildInfo;
         }
 
@@ -324,14 +331,19 @@ namespace GodotTools.Build
             string? platform = null
         ) => CleanProjectBlocking(CreateBuildInfo(configuration, platform, rebuild: false, onlyClean: true));
 
+        /// <param name="customProperties">
+        /// Extra MSBuild properties (<c>Name=Value</c>) appended to the publish, e.g.
+        /// <c>PublishAot=true</c> for the NativeAOT export backend.
+        /// </param>
         public static bool PublishProjectBlocking(
             string configuration,
             string platform,
             string runtimeIdentifier,
             string publishOutputDir,
-            bool includeDebugSymbols = true
+            bool includeDebugSymbols = true,
+            IEnumerable<string>? customProperties = null
         ) => PublishProjectBlocking(CreatePublishBuildInfo(configuration,
-            platform, runtimeIdentifier, publishOutputDir, includeDebugSymbols));
+            platform, runtimeIdentifier, publishOutputDir, includeDebugSymbols, customProperties));
 
         public static bool GenerateXCFrameworkBlocking(
             List<string> outputPaths,
