@@ -34,6 +34,7 @@ namespace GodotTools
             public const string NoConsoleLogging = "dotnet/build/no_console_logging";
             public const string CreateBinaryLog = "dotnet/build/create_binary_log";
             public const string ProblemsLayout = "dotnet/build/problems_layout";
+            public const string Dn2CppToolchainPath = Dn2CppToolchain.ToolchainPathSetting;
         }
 
 #nullable disable
@@ -557,6 +558,9 @@ namespace GodotTools
             EditorDef(Settings.CreateBinaryLog, false);
             EditorDef(Settings.ProblemsLayout, Variant.From(BuildProblemsView.ProblemsLayout.Tree));
 
+            // Empty means "use the toolchain bundled with this editor".
+            EditorDef(Settings.Dn2CppToolchainPath, "");
+
             string settingsHintStr = "Disabled";
 
             if (OS.IsWindows)
@@ -623,6 +627,13 @@ namespace GodotTools
                 ["name"] = Settings.ProblemsLayout,
                 ["hint"] = (int)PropertyHint.Enum,
                 ["hint_string"] = "View as List,View as Tree",
+            });
+
+            _editorSettings.AddPropertyInfo(new Godot.Collections.Dictionary
+            {
+                ["type"] = (int)Variant.Type.String,
+                ["name"] = Settings.Dn2CppToolchainPath,
+                ["hint"] = (int)PropertyHint.GlobalDir,
             });
 
             OnSettingsChanged();

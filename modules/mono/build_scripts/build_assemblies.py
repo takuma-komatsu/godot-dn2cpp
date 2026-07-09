@@ -357,6 +357,48 @@ def generate_sdk_package_versions():
         f.write(constants)
 
 
+def install_dn2cpp_toolchain(bundle_path, output_dir):
+    """Install the dn2cpp export toolchain into <output_dir>/GodotSharp/Dn2Cpp.
+
+    Mirrors how GodotTools.dll lands in GodotSharp/Tools: the editor resolves the
+    toolchain relative to its own assembly, so the bundle only has to travel with
+    the GodotSharp data directory. `bundle_path` is either a layout directory or
+    the .tar.gz of one, both produced by dn2cpp's dist/package-toolchain.sh.
+    """
+    import shutil
+    import tarfile
+    import tempfile
+
+    dest = os.path.join(output_dir, "GodotSharp", "Dn2Cpp")
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        if os.path.isdir(bundle_path):
+            layout = bundle_path
+        elif tarfile.is_tarfile(bundle_path):
+            with tarfile.open(bundle_path) as tar:
+                tar.extractall(tmp_dir)
+            # The tarball wraps the layout in a single versioned directory.
+            entries = [os.path.join(tmp_dir, name) for name in os.listdir(tmp_dir)]
+            layout = entries[0] if len(entries) == 1 and os.path.isdir(entries[0]) else tmp_dir
+        else:
+            print(f"Not a dn2cpp toolchain layout directory or tarball: {bundle_path}")
+            return 1
+
+        # The native CLI is what makes the bundle self-contained; without it the
+        # export backend has nothing to transpile with.
+        if not os.path.isfile(os.path.join(layout, "bin", "dn2cpp")) and not os.path.isfile(
+            os.path.join(layout, "bin", "dn2cpp.exe")
+        ):
+            print(f"dn2cpp toolchain layout has no bin/dn2cpp: {layout}")
+            return 1
+
+        print(f"Installing the dn2cpp export toolchain to {dest}...")
+        shutil.rmtree(dest, ignore_errors=True)
+        shutil.copytree(layout, dest, symlinks=True)
+
+    return 0
+
+
 def build_all(
     msbuild_tool, module_dir, output_dir, godot_platform, dev_debug, push_nupkgs_local, precision, no_deprecated, werror
 ):
@@ -424,6 +466,13 @@ def main():
         help="Build GodotSharp without using deprecated features. This is required, if the engine was built with 'deprecated=no'.",
     )
     parser.add_argument("--werror", action="store_true", default=False, help="Treat compiler warnings as errors.")
+    parser.add_argument(
+        "--bundle-dn2cpp",
+        type=str,
+        default="",
+        help="Install a dn2cpp export toolchain (layout directory or .tar.gz from dist/package-toolchain.sh) "
+        "into GodotSharp/Dn2Cpp, making the dn2cpp export backend available to this editor.",
+    )
 
     args = parser.parse_args()
 
@@ -451,6 +500,10 @@ def main():
         args.no_deprecated,
         args.werror,
     )
+
+    if exit_code == 0 and args.bundle_dn2cpp:
+        exit_code = install_dn2cpp_toolchain(os.path.abspath(args.bundle_dn2cpp), output_dir)
+
     sys.exit(exit_code)
 
 
