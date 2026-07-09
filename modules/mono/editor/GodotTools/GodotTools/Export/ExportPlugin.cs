@@ -261,9 +261,11 @@ namespace GodotTools.Export
             var exportBackend = (ExportBackend)(int)GetOption("dotnet/export_backend");
 
             // Fails before the publish runs, so an unusable target or a missing C++
-            // toolchain costs no build time.
+            // toolchain costs no build time. It is handed the architectures that were
+            // just resolved, not the features they came from: those are what the loop
+            // below publishes and packages.
             using Dn2CppExporter? dn2CppExporter = exportBackend == ExportBackend.Dn2Cpp
-                ? Dn2CppExporter.Create(platform, features)
+                ? Dn2CppExporter.Create(platform, publishConfig.Archs)
                 : null;
 
             // The NativeAOT backend is entirely a publish-time property; the native
@@ -362,7 +364,7 @@ namespace GodotTools.Export
                     // packaged is its staging directory rather than the publish.
                     string exportContentsDir = dn2CppExporter is not null
                         ? dn2CppExporter.BuildDropIn(publishOutputDir, GodotSharpDirs.ProjectAssemblyName,
-                            buildConfig, runtimeIdentifier)
+                            buildConfig, runtimeIdentifier, arch)
                         : publishOutputDir;
 
                     var manifest = new StringBuilder();

@@ -66,7 +66,12 @@ namespace GodotTools.Export
         /// Throws with an actionable message — <c>_ExportBegin</c> surfaces it
         /// through <c>AddMessage(Error, …)</c>.
         /// </summary>
-        public static Dn2CppExporter Create(string godotPlatform, IReadOnlyCollection<string> features)
+        /// <param name="archs">
+        /// The architectures the caller is about to publish and package, not the
+        /// preset's feature set. A feature naming an architecture does not make it
+        /// a target, and a target is what this backend has to be able to build.
+        /// </param>
+        public static Dn2CppExporter Create(string godotPlatform, IReadOnlyCollection<string> archs)
         {
             if (godotPlatform != OS.Platforms.MacOS)
             {
@@ -79,18 +84,28 @@ namespace GodotTools.Export
             // machine's architecture is the only one it can target.
             string hostArch = GetHostArchitecture();
 
-            if (features.Contains("universal"))
+            if (archs.Count == 0)
             {
                 throw new NotSupportedException(
-                    "The dn2cpp export backend cannot produce a universal binary: it compiles the game for the " +
-                    $"host architecture ({hostArch}). Set 'binary_format/architecture' to '{hostArch}'.");
+                    "The dn2cpp export backend needs a target architecture, and this preset selects none. " +
+                    $"Set 'binary_format/architecture' to '{hostArch}'.");
             }
 
-            if (!features.Contains(hostArch))
+            if (archs.Count > 1)
             {
                 throw new NotSupportedException(
-                    $"The dn2cpp export backend compiles for the host architecture ({hostArch}); this preset " +
-                    "targets a different one. Cross-architecture export is not supported yet.");
+                    $"The dn2cpp export backend compiles the game for the host architecture ({hostArch}) and " +
+                    $"cannot cross-compile, so it cannot serve a preset targeting {DescribeArchs(archs)}. Set " +
+                    $"'binary_format/architecture' to '{hostArch}' ('universal' selects two), and keep " +
+                    "architecture names out of 'custom_features'.");
+            }
+
+            string arch = archs.First();
+            if (arch != hostArch)
+            {
+                throw new NotSupportedException(
+                    $"The dn2cpp export backend compiles the game for the host architecture ({hostArch}); this " +
+                    $"preset targets '{arch}'. Cross-architecture export is not supported yet.");
             }
 
             var missingTools = new List<string>();
@@ -132,8 +147,20 @@ namespace GodotTools.Export
         /// alongside would route the exported game straight back to the .NET host.
         /// </remarks>
         public string BuildDropIn(string publishOutputDir, string assemblyName, string buildConfig,
-            string runtimeIdentifier)
+            string runtimeIdentifier, string arch)
         {
+            // Create refuses any target set other than the host's own, but it sees
+            // one publish config and the caller loops over every architecture of
+            // every one of them. A foreign architecture reaching here would stage a
+            // host-compiled library into another architecture's data directory,
+            // where the engine would load it on no machine at all.
+            string hostArch = GetHostArchitecture();
+            if (arch != hostArch)
+            {
+                throw new InvalidOperationException(
+                    $"The dn2cpp export backend compiles for '{hostArch}', but the export is packaging '{arch}'.");
+            }
+
             string workDir = Path.Combine(MonoDataDir, "dn2cpp");
             string slot = $"{buildConfig}-{runtimeIdentifier}";
             string ilDir = Path.Combine(workDir, "il", slot);
@@ -250,6 +277,12 @@ namespace GodotTools.Export
         /// <summary>The project's <c>.godot/mono</c> directory, where the persistent build tree lives.</summary>
         private static string MonoDataDir =>
             Path.GetFullPath(Path.Combine(GodotSharpDirs.ProjectBaseOutputPath, "..", ".."));
+
+        /// <summary>The target architectures, ordered, for an error message.</summary>
+        private static string DescribeArchs(IEnumerable<string> archs)
+        {
+            return string.Join(", ", archs.OrderBy(a => a, StringComparer.Ordinal));
+        }
 
         private static string GetHostArchitecture()
         {
