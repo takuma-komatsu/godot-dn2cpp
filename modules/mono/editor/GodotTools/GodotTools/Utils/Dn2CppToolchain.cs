@@ -42,12 +42,13 @@ namespace GodotTools.Utils
         /// The managed support shim, which defines the types the transpiler
         /// synthesizes — notably the <c>SZArrayEnumerable&lt;T&gt;</c> behind
         /// <c>((IEnumerable&lt;T&gt;)array).GetEnumerator()</c>.
-        /// <para>It must be passed explicitly with <c>-r</c>. A .NET-hosted
-        /// transpiler picks it up from <c>AppContext.BaseDirectory</c>, but a
-        /// self-hosted native one has no managed entry assembly, so that property
-        /// degrades to the empty string and the auto-reference is silently skipped
-        /// (<c>MethodCompiler.IntrinsicsInterop</c>). Omitting it emits a program
-        /// that links, exports the entry point, and then dies in
+        /// <para>The transpiler auto-references it from <c>AppContext.BaseDirectory</c>,
+        /// which a self-hosted native binary answers with its own directory — so a
+        /// bundle that ships it beside the CLI resolves it without help. We pass it
+        /// explicitly with <c>-r</c> anyway: an explicit path cannot be defeated by a
+        /// relocated or symlinked binary. A transpile that needs the shim and cannot
+        /// find it fails outright (<c>Compilation.RequireShimType</c>) rather than
+        /// emitting a program that links, exports the entry point, and dies in
         /// <c>dn2cpp_resolve_interface</c> the first time it enumerates an
         /// array — so its presence is validated, never assumed.</para>
         /// </summary>

@@ -169,8 +169,9 @@ namespace GodotTools.Export
                 transpileArgs.Add("-r");
                 transpileArgs.Add(dependency);
             }
-            // Last, mirroring where a .NET-hosted transpiler appends its own copy:
-            // the module order decides which module wins a type-name tie.
+            // Last, mirroring where the transpiler appends the copy it auto-references
+            // from its own directory: the module order decides which module wins a
+            // type-name tie. Passing it explicitly is belt and braces — see RuntimeShim.
             transpileArgs.Add("-r");
             transpileArgs.Add(_toolchain.RuntimeShim);
             transpileArgs.Add("--auto-ref");
