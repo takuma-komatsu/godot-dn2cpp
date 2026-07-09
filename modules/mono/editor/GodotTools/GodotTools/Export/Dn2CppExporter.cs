@@ -348,6 +348,13 @@ namespace GodotTools.Export
 
         private void RunTool(string exe, List<string> args, string step)
         {
+            // The tail quotes the step that failed, so it starts at that step's
+            // command line. The parameterless WaitForExit below drains the previous
+            // process's asynchronous readers before returning, so nothing of it can
+            // still arrive here.
+            lock (_logTail)
+                _logTail.Clear();
+
             LogLine($"$ {exe} {string.Join(' ', args)}");
 
             using var process = new Process
