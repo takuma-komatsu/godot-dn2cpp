@@ -18,6 +18,23 @@ namespace GodotTools.Export
 {
     public partial class ExportPlugin : EditorExportPlugin
     {
+        /// <summary>
+        /// How the exported game runs its C# code. The values are the indices of
+        /// the <c>dotnet/export_backend</c> enum hint, so they are stored in
+        /// export presets and must not be reordered.
+        /// </summary>
+        private enum ExportBackend
+        {
+            /// <summary>The .NET host runtime loads the published managed assemblies.</summary>
+            HostRuntime = 0,
+
+            /// <summary>The publish is ahead-of-time compiled into a drop-in native library.</summary>
+            NativeAot = 1,
+
+            /// <summary>The published IL is transpiled to C++ and compiled into a drop-in native library.</summary>
+            Dn2Cpp = 2,
+        }
+
         public override string _GetName() => "C#";
 
         private List<string> _tempFolders = new List<string>();
@@ -97,6 +114,22 @@ namespace GodotTools.Export
                         }
                     },
                     { "default_value", false }
+                }
+            );
+            exportOptionList.Add
+            (
+                new Godot.Collections.Dictionary()
+                {
+                    {
+                        "option", new Godot.Collections.Dictionary()
+                        {
+                            { "name", "dotnet/export_backend" },
+                            { "type", (int)Variant.Type.Int },
+                            { "hint", (int)PropertyHint.Enum },
+                            { "hint_string", "Host Runtime,NativeAOT,dn2cpp" }
+                        }
+                    },
+                    { "default_value", (int)ExportBackend.HostRuntime }
                 }
             );
             return exportOptionList;
@@ -225,6 +258,20 @@ namespace GodotTools.Export
                 }
             }
 
+            var exportBackend = (ExportBackend)(int)GetOption("dotnet/export_backend");
+
+            // Fails before the publish runs, so an unusable target or a missing C++
+            // toolchain costs no build time.
+            using Dn2CppExporter? dn2CppExporter = exportBackend == ExportBackend.Dn2Cpp
+                ? Dn2CppExporter.Create(platform, features)
+                : null;
+
+            // The NativeAOT backend is entirely a publish-time property; the native
+            // output it leaves in the publish directory is picked up below.
+            List<string>? publishProperties = exportBackend == ExportBackend.NativeAot
+                ? new List<string> { "PublishAot=true" }
+                : null;
+
             var targets = new List<PublishConfig> { publishConfig };
 
             if (platform == OS.Platforms.iOS)
@@ -284,7 +331,7 @@ namespace GodotTools.Export
 
                     // Execute dotnet publish.
                     if (!BuildManager.PublishProjectBlocking(buildConfig, platform,
-                            runtimeIdentifier, publishOutputDir, includeDebugSymbols))
+                            runtimeIdentifier, publishOutputDir, includeDebugSymbols, publishProperties))
                     {
                         throw new InvalidOperationException("Failed to build project. Check MSBuild panel for details.");
                     }
@@ -310,10 +357,18 @@ namespace GodotTools.Export
                     if (!config.BundleOutputs)
                         continue;
 
+                    // The dn2cpp backend ships a single drop-in library in place of
+                    // the publish directory's managed assemblies, so what gets
+                    // packaged is its staging directory rather than the publish.
+                    string exportContentsDir = dn2CppExporter is not null
+                        ? dn2CppExporter.BuildDropIn(publishOutputDir, GodotSharpDirs.ProjectAssemblyName,
+                            buildConfig, runtimeIdentifier)
+                        : publishOutputDir;
+
                     var manifest = new StringBuilder();
 
                     // Add to the exported project shared object list or packed resources.
-                    RecursePublishContents(publishOutputDir,
+                    RecursePublishContents(exportContentsDir,
                         filterDir: dir =>
                         {
                             if (platform == OS.Platforms.iOS)
@@ -367,7 +422,7 @@ namespace GodotTools.Export
 
                                             AddSharedObject(path, tags: new string[] { arch },
                                                 Path.Join(projectDataDirName,
-                                                    Path.GetRelativePath(publishOutputDir,
+                                                    Path.GetRelativePath(exportContentsDir,
                                                         Path.GetDirectoryName(path)!)));
 
                                             return;
@@ -394,7 +449,7 @@ namespace GodotTools.Export
                                         }
                                     }
 
-                                    string filePath = SanitizeSlashes(Path.GetRelativePath(publishOutputDir, path));
+                                    string filePath = SanitizeSlashes(Path.GetRelativePath(exportContentsDir, path));
                                     byte[] fileData = File.ReadAllBytes(path);
                                     string hash = Convert.ToBase64String(SHA512.HashData(fileData));
 
@@ -412,7 +467,7 @@ namespace GodotTools.Export
                                     {
                                         AddSharedObject(path, tags: null,
                                             Path.Join(projectDataDirName,
-                                                Path.GetRelativePath(publishOutputDir,
+                                                Path.GetRelativePath(exportContentsDir,
                                                     Path.GetDirectoryName(path)!)));
                                     }
                                 }
