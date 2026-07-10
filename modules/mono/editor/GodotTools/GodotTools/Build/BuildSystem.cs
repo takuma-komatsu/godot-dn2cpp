@@ -384,8 +384,15 @@ namespace GodotTools.Build
             {
                 arguments.Add("-library");
                 arguments.Add(Path.Combine(outputPath, baseDylib));
-                arguments.Add("-debug-symbols");
-                arguments.Add(Path.Combine(outputPath, baseSym));
+
+                // Only an AOT publish produces this dSYM; `xcodebuild
+                // -create-xcframework` fails on a nonexistent -debug-symbols path.
+                string dSymPath = Path.Combine(outputPath, baseSym);
+                if (Directory.Exists(dSymPath))
+                {
+                    arguments.Add("-debug-symbols");
+                    arguments.Add(dSymPath);
+                }
             }
 
             arguments.Add("-output");
