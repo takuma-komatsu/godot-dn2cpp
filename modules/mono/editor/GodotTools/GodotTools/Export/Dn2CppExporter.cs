@@ -33,6 +33,13 @@ namespace GodotTools.Export
         private const int RequiredCMakeMajor = 3;
         private const int RequiredCMakeMinor = 20;
 
+        /// <summary>
+        /// The minimum iOS version the compiled library declares. 16.3 is the
+        /// floor for float <c>std::to_chars</c> in libc++, which the bundled
+        /// runtime's number formatting is built on.
+        /// </summary>
+        private const string IOSDeploymentTarget = "16.3";
+
         /// <summary>How much of the tool output to quote back in an error message.</summary>
         private const int LogTailLines = 30;
 
@@ -73,39 +80,56 @@ namespace GodotTools.Export
         /// </param>
         public static Dn2CppExporter Create(string godotPlatform, IReadOnlyCollection<string> archs)
         {
-            if (godotPlatform != OS.Platforms.MacOS)
+            if (godotPlatform == OS.Platforms.MacOS)
+            {
+                // The bundle compiles the game with the host's clang++, so the export
+                // machine's architecture is the only one it can target.
+                string hostArch = GetHostArchitecture();
+
+                if (archs.Count == 0)
+                {
+                    throw new NotSupportedException(
+                        "The dn2cpp export backend needs a target architecture, and this preset selects none. " +
+                        $"Set 'binary_format/architecture' to '{hostArch}'.");
+                }
+
+                if (archs.Count > 1)
+                {
+                    throw new NotSupportedException(
+                        $"The dn2cpp export backend compiles the game for the host architecture ({hostArch}) and " +
+                        $"cannot cross-compile, so it cannot serve a preset targeting {DescribeArchs(archs)}. Set " +
+                        $"'binary_format/architecture' to '{hostArch}' ('universal' selects two), and keep " +
+                        "architecture names out of 'custom_features'.");
+                }
+
+                string arch = archs.First();
+                if (arch != hostArch)
+                {
+                    throw new NotSupportedException(
+                        $"The dn2cpp export backend compiles the game for the host architecture ({hostArch}); this " +
+                        $"preset targets '{arch}'. Cross-architecture export is not supported yet.");
+                }
+            }
+            else if (godotPlatform == OS.Platforms.iOS)
+            {
+                // clang cross-targets iOS through -arch and a sysroot, so the host
+                // architecture is no constraint here — but arm64 is the only iOS
+                // device architecture there is, so it is all the backend builds.
+                if (archs.Count != 1 || archs.First() != "arm64")
+                {
+                    throw new NotSupportedException(
+                        "The dn2cpp export backend supports only the arm64 device architecture on iOS" +
+                        (archs.Count == 0
+                            ? ", and this preset selects none. "
+                            : $", and this preset targets {DescribeArchs(archs)}. ") +
+                        "Set 'binary_format/architecture' to 'arm64'.");
+                }
+            }
+            else
             {
                 throw new NotSupportedException(
-                    $"The dn2cpp export backend supports macOS only for now, not '{godotPlatform}'. " +
+                    $"The dn2cpp export backend supports macOS and iOS only for now, not '{godotPlatform}'. " +
                     "Switch 'dotnet/export_backend' to 'Host Runtime' or 'NativeAOT' for this preset.");
-            }
-
-            // The bundle compiles the game with the host's clang++, so the export
-            // machine's architecture is the only one it can target.
-            string hostArch = GetHostArchitecture();
-
-            if (archs.Count == 0)
-            {
-                throw new NotSupportedException(
-                    "The dn2cpp export backend needs a target architecture, and this preset selects none. " +
-                    $"Set 'binary_format/architecture' to '{hostArch}'.");
-            }
-
-            if (archs.Count > 1)
-            {
-                throw new NotSupportedException(
-                    $"The dn2cpp export backend compiles the game for the host architecture ({hostArch}) and " +
-                    $"cannot cross-compile, so it cannot serve a preset targeting {DescribeArchs(archs)}. Set " +
-                    $"'binary_format/architecture' to '{hostArch}' ('universal' selects two), and keep " +
-                    "architecture names out of 'custom_features'.");
-            }
-
-            string arch = archs.First();
-            if (arch != hostArch)
-            {
-                throw new NotSupportedException(
-                    $"The dn2cpp export backend compiles the game for the host architecture ({hostArch}); this " +
-                    $"preset targets '{arch}'. Cross-architecture export is not supported yet.");
             }
 
             var missingTools = new List<string>();
@@ -129,6 +153,15 @@ namespace GodotTools.Export
 
             VerifyCMakeVersion(cmakeExe!);
 
+            if (godotPlatform == OS.Platforms.iOS)
+            {
+                // The Xcode Command Line Tools carry the macOS SDK only; probing
+                // both iOS SDKs up front turns what would be a cryptic mid-build
+                // clang failure into an actionable refusal.
+                VerifyAppleSdk("iphoneos");
+                VerifyAppleSdk("iphonesimulator");
+            }
+
             if (!Dn2CppToolchain.TryResolve(out Dn2CppToolchain? toolchain, out string toolchainError))
                 throw new NotSupportedException(toolchainError);
 
@@ -149,16 +182,39 @@ namespace GodotTools.Export
         public string BuildDropIn(string publishOutputDir, string assemblyName, string buildConfig,
             string runtimeIdentifier, string arch)
         {
-            // Create refuses any target set other than the host's own, but it sees
+            // Create refuses any target set the backend cannot build, but it sees
             // one publish config and the caller loops over every architecture of
-            // every one of them. A foreign architecture reaching here would stage a
-            // host-compiled library into another architecture's data directory,
-            // where the engine would load it on no machine at all.
-            string hostArch = GetHostArchitecture();
-            if (arch != hostArch)
+            // every one of them, so each combination is re-checked here. iOS
+            // libraries are cross-compiled, so there the check is that the
+            // architecture agrees with the runtime identifier it is built under;
+            // everywhere else the library is host-compiled, and a foreign
+            // architecture reaching here would stage a library into another
+            // architecture's data directory, where the engine would load it on
+            // no machine at all.
+            bool targetsIOS = runtimeIdentifier.StartsWith("ios", StringComparison.Ordinal);
+            if (targetsIOS)
             {
-                throw new InvalidOperationException(
-                    $"The dn2cpp export backend compiles for '{hostArch}', but the export is packaging '{arch}'.");
+                string ridArch = arch switch
+                {
+                    "arm64" => "arm64",
+                    "x86_64" => "x64",
+                    _ => arch,
+                };
+                if (!runtimeIdentifier.EndsWith($"-{ridArch}", StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        $"The dn2cpp export backend is building '{runtimeIdentifier}', but the export is " +
+                        $"packaging '{arch}'.");
+                }
+            }
+            else
+            {
+                string hostArch = GetHostArchitecture();
+                if (arch != hostArch)
+                {
+                    throw new InvalidOperationException(
+                        $"The dn2cpp export backend compiles for '{hostArch}', but the export is packaging '{arch}'.");
+                }
             }
 
             string workDir = Path.Combine(MonoDataDir, "dn2cpp");
@@ -216,7 +272,7 @@ namespace GodotTools.Export
             // assertions that every dn2cpp gate runs with.
             GD.Print($"dn2cpp: compiling the drop-in library ({slot})...");
             Directory.CreateDirectory(buildDir);
-            RunTool(_cmakeExe, new List<string>
+            var configureArgs = new List<string>
             {
                 "-S", _toolchain.RuntimeDir,
                 "-B", buildDir,
@@ -224,7 +280,21 @@ namespace GodotTools.Export
                 "-DDN2CPP_DOTNET_MODULE=ON",
                 $"-DDN2CPP_APP_DIR={genDir}",
                 $"-DDN2CPP_APP_NAME={assemblyName}",
-            }, "configuring the native build");
+            };
+            if (targetsIOS)
+            {
+                // Retarget the host clang at the device or simulator SDK. The arch
+                // parameter carries Godot's architecture names (arm64, x86_64),
+                // which are exactly clang's -arch spellings.
+                string sysroot = runtimeIdentifier.StartsWith("iossimulator-", StringComparison.Ordinal)
+                    ? "iphonesimulator"
+                    : "iphoneos";
+                configureArgs.Add("-DCMAKE_SYSTEM_NAME=iOS");
+                configureArgs.Add($"-DCMAKE_OSX_SYSROOT={sysroot}");
+                configureArgs.Add($"-DCMAKE_OSX_ARCHITECTURES={arch}");
+                configureArgs.Add($"-DCMAKE_OSX_DEPLOYMENT_TARGET={IOSDeploymentTarget}");
+            }
+            RunTool(_cmakeExe, configureArgs, "configuring the native build");
             RunTool(_cmakeExe, new List<string> { "--build", buildDir }, "compiling the drop-in library");
 
             // CMake names a SHARED target's output lib<name>.dylib; the engine opens
@@ -239,6 +309,15 @@ namespace GodotTools.Export
             RecreateDirectory(stageDir);
             string stagedLibrary = Path.Combine(stageDir, $"{assemblyName}.dylib");
             File.Copy(builtLibrary, stagedLibrary, overwrite: true);
+
+            if (targetsIOS)
+            {
+                // The backend-agnostic iOS packaging tail lipos {assembly}.dylib
+                // out of every publish directory and wraps the results into the
+                // _aot.xcframework the exported app embeds, so the library also
+                // goes where a NativeAOT publish would have left it.
+                File.Copy(builtLibrary, Path.Combine(publishOutputDir, $"{assemblyName}.dylib"), overwrite: true);
+            }
 
             LogLine($"staged {stagedLibrary}");
             GD.Print($"dn2cpp: staged {stagedLibrary}");
@@ -293,6 +372,32 @@ namespace GodotTools.Export
                 var other => throw new NotSupportedException(
                     $"The dn2cpp export backend does not support the host architecture '{other}'."),
             };
+        }
+
+        /// <summary>
+        /// Verifies that xcrun resolves the named Apple SDK to a directory that
+        /// exists. The Xcode Command Line Tools ship the macOS SDK only, so the
+        /// iOS device and simulator SDKs are what distinguish a full Xcode.
+        /// </summary>
+        private static void VerifyAppleSdk(string sdk)
+        {
+            string sdkPath;
+            try
+            {
+                sdkPath = CaptureToolOutput("xcrun", "--sdk", sdk, "--show-sdk-path").Trim();
+            }
+            catch (Exception)
+            {
+                sdkPath = string.Empty;
+            }
+
+            if (sdkPath.Length == 0 || !Directory.Exists(sdkPath))
+            {
+                throw new NotSupportedException(
+                    $"The dn2cpp export backend requires full Xcode to target iOS (xcrun --sdk {sdk} failed). " +
+                    "Install Xcode, select it with 'sudo xcode-select --switch /Applications/Xcode.app', and " +
+                    "restart the editor.");
+            }
         }
 
         private static void VerifyCMakeVersion(string cmakeExe)

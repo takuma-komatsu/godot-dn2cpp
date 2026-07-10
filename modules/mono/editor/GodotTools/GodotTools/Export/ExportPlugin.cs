@@ -270,9 +270,25 @@ namespace GodotTools.Export
 
             // The NativeAOT backend is entirely a publish-time property; the native
             // output it leaves in the publish directory is picked up below.
-            List<string>? publishProperties = exportBackend == ExportBackend.NativeAot
-                ? new List<string> { "PublishAot=true" }
-                : null;
+            List<string>? publishProperties = exportBackend switch
+            {
+                ExportBackend.NativeAot => new List<string> { "PublishAot=true" },
+                // The dn2cpp backend consumes plain IL, so it undoes the AOT
+                // publish the SDK's iOS.props forces (these are passed as global
+                // -p: properties, which beat the .props) and keeps the publish
+                // framework-dependent — no runtime ships next to the game. The
+                // -p: pairs also land after --self-contained on the publish
+                // command line, so the later definition wins there too.
+                ExportBackend.Dn2Cpp when platform == OS.Platforms.iOS => new List<string>
+                {
+                    "PublishAot=false",
+                    "PublishAotUsingRuntimePack=false",
+                    "UseNativeAOTRuntime=false",
+                    "SelfContained=false",
+                    "UseAppHost=false",
+                },
+                _ => null,
+            };
 
             var targets = new List<PublishConfig> { publishConfig };
 
@@ -355,17 +371,20 @@ namespace GodotTools.Export
                             $"Publish succeeded but project assembly not found at '{assemblyPath}' or '{nativeAotPath}'.");
                     }
 
+                    // The dn2cpp backend ships a single drop-in library in place of
+                    // the publish directory's managed assemblies, so what gets
+                    // packaged is its staging directory rather than the publish.
+                    // It runs before the simulator skip below: the simulator
+                    // outputs are never bundled, but their libraries feed the
+                    // xcframework tail after this loop.
+                    string? dn2CppContentsDir = dn2CppExporter?.BuildDropIn(publishOutputDir,
+                        GodotSharpDirs.ProjectAssemblyName, buildConfig, runtimeIdentifier, arch);
+
                     // For ios simulator builds, skip packaging the build outputs.
                     if (!config.BundleOutputs)
                         continue;
 
-                    // The dn2cpp backend ships a single drop-in library in place of
-                    // the publish directory's managed assemblies, so what gets
-                    // packaged is its staging directory rather than the publish.
-                    string exportContentsDir = dn2CppExporter is not null
-                        ? dn2CppExporter.BuildDropIn(publishOutputDir, GodotSharpDirs.ProjectAssemblyName,
-                            buildConfig, runtimeIdentifier, arch)
-                        : publishOutputDir;
+                    string exportContentsDir = dn2CppContentsDir ?? publishOutputDir;
 
                     var manifest = new StringBuilder();
 
