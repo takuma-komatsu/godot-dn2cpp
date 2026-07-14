@@ -422,17 +422,27 @@ Ref<Texture2D> EditorExportPlatformWeb::get_logo() const {
 }
 
 bool EditorExportPlatformWeb::has_valid_export_configuration(const Ref<EditorExportPreset> &p_preset, String &r_error, bool &r_missing_templates, bool p_debug) const {
-#ifdef MODULE_MONO_ENABLED
-	// Don't check for additional errors, as this particular error cannot be resolved.
-	r_error += TTR("Exporting to Web is currently not supported in Godot 4 when using C#/.NET. Use Godot 3 to target Web with C#/Mono instead.") + "\n";
-	r_error += TTR("If this project does not use C#, use a non-C# editor build to export the project.") + "\n";
-	return false;
-#else
-
 	String err;
 	bool valid = false;
 	bool extensions = (bool)p_preset->get("variant/extensions_support");
 	bool thread_support = (bool)p_preset->get("variant/thread_support");
+
+#ifdef MODULE_MONO_ENABLED
+	// No .NET runtime exists on the Web, so a C# game can only ship as an
+	// ahead-of-time compiled drop-in that GDMono dlopen()s — the dn2cpp export
+	// backend. That drop-in is a WebAssembly side module, so the engine has to
+	// be a "dlink" build (Extensions Support), and it is single-threaded.
+	// Whether the project is even a C# one is not knowable here, so this stays
+	// a warning; the .NET export plugin refuses the unworkable combinations,
+	// and does so only for projects that actually carry C#.
+	err += TTR("Exporting to Web when using C#/.NET is experimental, and requires the dn2cpp export backend.") + "\n";
+	if (!extensions) {
+		err += TTR("A C#/.NET Web export needs \"Extensions Support\": the compiled game is loaded as a WebAssembly side module.") + "\n";
+	}
+	if (thread_support) {
+		err += TTR("A C#/.NET Web export needs \"Thread Support\" disabled: the compiled game is single-threaded.") + "\n";
+	}
+#endif // MODULE_MONO_ENABLED
 
 	// Look for export templates (first official, and if defined custom templates).
 	bool dvalid = exists_export_template(_get_template_name(extensions, thread_support, true), &err);
@@ -459,7 +469,6 @@ bool EditorExportPlatformWeb::has_valid_export_configuration(const Ref<EditorExp
 	}
 
 	return valid;
-#endif // !MODULE_MONO_ENABLED
 }
 
 bool EditorExportPlatformWeb::has_valid_project_configuration(const Ref<EditorExportPreset> &p_preset, String &r_error) const {

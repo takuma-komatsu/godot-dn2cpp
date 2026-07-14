@@ -81,6 +81,11 @@ def get_flags():
         "target": "template_debug",
         "builtin_pcre2_with_jit": False,
         "vulkan": False,
+        # The C# runtime is never loaded on the Web: neither hostfxr nor coreclr
+        # exists there, so GDMono falls through to try_load_native_aot_library(),
+        # which dlopen()s an ahead-of-time compiled drop-in. That path needs the
+        # module compiled in; it does not need a .NET runtime.
+        "supported": ["mono"],
         # Embree is heavy and requires too much memory (GH-70621).
         "module_raycast_enabled": False,
         # Use -Os to prioritize optimizing for reduced file size. This is
