@@ -83,7 +83,10 @@ void main_loop_callback() {
 	uint64_t current_ticks = os->get_ticks_usec();
 #endif
 
-	bool force_draw = DisplayServerWeb::get_singleton()->check_size_force_redraw();
+	// Absent under --headless, where the display server is a DisplayServerHeadless
+	// and there is no canvas to track.
+	DisplayServerWeb *display_server = DisplayServerWeb::get_singleton();
+	bool force_draw = display_server && display_server->check_size_force_redraw();
 	if (force_draw) {
 		Main::force_redraw();
 #ifndef PROXY_TO_PTHREAD_ENABLED
