@@ -59,8 +59,13 @@
 #define DOM_BUTTON_XBUTTON1 3
 #define DOM_BUTTON_XBUTTON2 4
 
+DisplayServerWeb *DisplayServerWeb::singleton = nullptr;
+
 DisplayServerWeb *DisplayServerWeb::get_singleton() {
-	return static_cast<DisplayServerWeb *>(DisplayServer::get_singleton());
+	// Not a static_cast of DisplayServer::get_singleton(): under --headless the
+	// active display server is a DisplayServerHeadless, and casting it would hand
+	// out a pointer whose members alias unrelated heap memory.
+	return singleton;
 }
 
 // Window (canvas)
@@ -1117,6 +1122,8 @@ DisplayServer *DisplayServerWeb::create_func(const String &p_rendering_driver, D
 DisplayServerWeb::DisplayServerWeb(const String &p_rendering_driver, DisplayServerEnums::WindowMode p_window_mode, DisplayServerEnums::VSyncMode p_vsync_mode, uint32_t p_flags, const Point2i *p_position, const Size2i &p_resolution, int p_screen, DisplayServerEnums::Context p_context, int64_t p_parent_window, Error &r_error) {
 	r_error = OK; // Always succeeds for now.
 
+	singleton = this;
+
 	native_menu = memnew(NativeMenu); // Dummy native menu.
 
 	// Ensure the canvas ID.
@@ -1186,6 +1193,8 @@ DisplayServerWeb::DisplayServerWeb(const String &p_rendering_driver, DisplayServ
 }
 
 DisplayServerWeb::~DisplayServerWeb() {
+	singleton = nullptr;
+
 	if (native_menu) {
 		memdelete(native_menu);
 		native_menu = nullptr;

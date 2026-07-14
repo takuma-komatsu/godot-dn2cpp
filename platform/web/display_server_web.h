@@ -166,8 +166,12 @@ private:
 protected:
 	int get_current_video_driver() const;
 
+	static DisplayServerWeb *singleton;
+
 public:
 	// Override return type to make writing static callbacks less tedious.
+	// Null when the active display server is not a DisplayServerWeb (--headless),
+	// so any caller that can run in that state must check before dereferencing.
 	static DisplayServerWeb *get_singleton();
 
 	// utilities
