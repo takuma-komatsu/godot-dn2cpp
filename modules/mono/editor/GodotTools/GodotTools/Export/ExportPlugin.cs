@@ -279,14 +279,20 @@ namespace GodotTools.Export
                 // framework-dependent — no runtime ships next to the game. The
                 // -p: pairs also land after --self-contained on the publish
                 // command line, so the later definition wins there too.
-                ExportBackend.Dn2Cpp when platform == OS.Platforms.iOS => new List<string>
-                {
-                    "PublishAot=false",
-                    "PublishAotUsingRuntimePack=false",
-                    "UseNativeAOTRuntime=false",
-                    "SelfContained=false",
-                    "UseAppHost=false",
-                },
+                //
+                // Android wants the same treatment for the second reason alone:
+                // the drop-in replaces the runtime wholesale, so a self-contained
+                // publish would restore a runtime pack the export then throws
+                // away — minutes of download for bytes nothing packages.
+                ExportBackend.Dn2Cpp when platform == OS.Platforms.iOS || platform == OS.Platforms.Android =>
+                    new List<string>
+                    {
+                        "PublishAot=false",
+                        "PublishAotUsingRuntimePack=false",
+                        "UseNativeAOTRuntime=false",
+                        "SelfContained=false",
+                        "UseAppHost=false",
+                    },
                 _ => null,
             };
 
