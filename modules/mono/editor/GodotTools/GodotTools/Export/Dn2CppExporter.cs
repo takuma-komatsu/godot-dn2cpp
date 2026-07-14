@@ -359,6 +359,19 @@ namespace GodotTools.Export
             transpileArgs.Add("-r");
             transpileArgs.Add(_toolchain.RuntimeShim);
             transpileArgs.Add("--auto-ref");
+            // Web only, and not an optimization: without it the game does not load at all.
+            // The Web target links the generated C++ as an Emscripten wasm SIDE MODULE, and
+            // a side module's __wasm_apply_data_relocs — one i32.store per pointer that lives
+            // in static data — is a single function, which V8 caps at 7,654,321 bytes. The
+            // reflection member tables are ~75% of that function's body, and they carried it
+            // to 9,031,961 bytes: over the ceiling, so the browser refused to instantiate the
+            // module. Trimming them lands it around 4.9 MB. No other target has a per-function
+            // ceiling, and the trim is not free — it costs reflection over framework types the
+            // program was not seen to name (a stripped type throws a PlatformNotSupportedException
+            // naming itself and '--reflection-root', rather than answering an empty member list) —
+            // so nothing but the Web pays for it.
+            if (targetsWeb)
+                transpileArgs.Add("--trim-reflection");
             transpileArgs.Add("-o");
             transpileArgs.Add(genDir);
             RunTool(_toolchain.Dn2CppExe, transpileArgs, "transpiling the game assembly");
