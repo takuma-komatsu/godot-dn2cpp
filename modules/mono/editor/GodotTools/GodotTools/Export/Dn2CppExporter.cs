@@ -40,19 +40,30 @@ namespace GodotTools.Export
         /// </summary>
         private const string IOSDeploymentTarget = "16.3";
 
+        /// <summary>
+        /// The Android API level the compiled library declares, and the ABI it is
+        /// built for. API 24 is the runtime's own floor (the bionic PAL is written
+        /// to it), well below Godot's; arm64-v8a is the one ABI a current device
+        /// needs.
+        /// </summary>
+        private const string AndroidPlatform = "android-24";
+        private const string AndroidAbi = "arm64-v8a";
+
         /// <summary>How much of the tool output to quote back in an error message.</summary>
         private const int LogTailLines = 30;
 
         private readonly Dn2CppToolchain _toolchain;
         private readonly string _cmakeExe;
+        private readonly string? _androidNdkRoot;
         private readonly string _logPath;
         private readonly StreamWriter _log;
         private readonly Queue<string> _logTail = new Queue<string>();
 
-        private Dn2CppExporter(Dn2CppToolchain toolchain, string cmakeExe)
+        private Dn2CppExporter(Dn2CppToolchain toolchain, string cmakeExe, string? androidNdkRoot)
         {
             _toolchain = toolchain;
             _cmakeExe = cmakeExe;
+            _androidNdkRoot = androidNdkRoot;
 
             string timestamp = DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
             string logsDir = Path.Combine(GodotSharpDirs.ProjectBaseOutputPath, "dn2cpp", "logs");
@@ -125,10 +136,26 @@ namespace GodotTools.Export
                         "Set 'binary_format/architecture' to 'arm64'.");
                 }
             }
+            else if (godotPlatform == OS.Platforms.Android)
+            {
+                // The NDK cross-targets Android through its own CMake toolchain
+                // file, so the host architecture is no constraint here — but
+                // arm64-v8a is the only ABI the backend builds, and the only one
+                // a current device needs.
+                if (archs.Count != 1 || archs.First() != "arm64")
+                {
+                    throw new NotSupportedException(
+                        "The dn2cpp export backend supports only the arm64 (arm64-v8a) architecture on Android" +
+                        (archs.Count == 0
+                            ? ", and this preset selects none. "
+                            : $", and this preset targets {DescribeArchs(archs)}. ") +
+                        "Enable 'architectures/arm64-v8a' alone in the preset.");
+                }
+            }
             else
             {
                 throw new NotSupportedException(
-                    $"The dn2cpp export backend supports macOS and iOS only for now, not '{godotPlatform}'. " +
+                    $"The dn2cpp export backend supports macOS, iOS and Android only for now, not '{godotPlatform}'. " +
                     "Switch 'dotnet/export_backend' to 'Host Runtime' or 'NativeAOT' for this preset.");
             }
 
@@ -162,10 +189,14 @@ namespace GodotTools.Export
                 VerifyAppleSdk("iphonesimulator");
             }
 
+            // Resolved here, for the same reason: an absent NDK is a refusal
+            // before the publish, not a cmake error twenty minutes in.
+            string? androidNdkRoot = godotPlatform == OS.Platforms.Android ? ResolveAndroidNdk() : null;
+
             if (!Dn2CppToolchain.TryResolve(out Dn2CppToolchain? toolchain, out string toolchainError))
                 throw new NotSupportedException(toolchainError);
 
-            return new Dn2CppExporter(toolchain, cmakeExe!);
+            return new Dn2CppExporter(toolchain, cmakeExe!, androidNdkRoot);
         }
 
         /// <summary>
@@ -192,7 +223,11 @@ namespace GodotTools.Export
             // architecture's data directory, where the engine would load it on
             // no machine at all.
             bool targetsIOS = runtimeIdentifier.StartsWith("ios", StringComparison.Ordinal);
-            if (targetsIOS)
+            // Android publishes under either RID family: android-* by default,
+            // linux-bionic-* when 'dotnet/android_use_linux_bionic' is on.
+            bool targetsAndroid = runtimeIdentifier.StartsWith("android-", StringComparison.Ordinal)
+                || runtimeIdentifier.StartsWith("linux-bionic-", StringComparison.Ordinal);
+            if (targetsIOS || targetsAndroid)
             {
                 string ridArch = arch switch
                 {
@@ -272,6 +307,14 @@ namespace GodotTools.Export
             // assertions that every dn2cpp gate runs with.
             GD.Print($"dn2cpp: compiling the drop-in library ({slot})...");
             Directory.CreateDirectory(buildDir);
+            // A CMake target name is not a free-form string — it may hold only
+            // [A-Za-z0-9_.+-], and a game's assembly name may hold anything a file
+            // name may ("Squash the Creeps (3D)"). Passing one straight through
+            // fails the configure outright ("reserved or not valid"), so the target
+            // is built under a sanitized name and staged under the real one below:
+            // what the engine dlopens is the name of the STAGED file, and nothing
+            // downstream ever sees the target's.
+            string targetName = SanitizeCMakeTarget(assemblyName);
             var configureArgs = new List<string>
             {
                 "-S", _toolchain.RuntimeDir,
@@ -279,7 +322,7 @@ namespace GodotTools.Export
                 "-G", "Ninja",
                 "-DDN2CPP_DOTNET_MODULE=ON",
                 $"-DDN2CPP_APP_DIR={genDir}",
-                $"-DDN2CPP_APP_NAME={assemblyName}",
+                $"-DDN2CPP_APP_NAME={targetName}",
             };
             if (targetsIOS)
             {
@@ -294,12 +337,25 @@ namespace GodotTools.Export
                 configureArgs.Add($"-DCMAKE_OSX_ARCHITECTURES={arch}");
                 configureArgs.Add($"-DCMAKE_OSX_DEPLOYMENT_TARGET={IOSDeploymentTarget}");
             }
+            else if (targetsAndroid)
+            {
+                // The NDK ships its own toolchain file — it selects the bionic
+                // sysroot, the target triple and the API-level defines together,
+                // which is why nothing here spells a compiler.
+                configureArgs.Add($"-DCMAKE_TOOLCHAIN_FILE={_androidNdkRoot}/build/cmake/android.toolchain.cmake");
+                configureArgs.Add($"-DANDROID_ABI={AndroidAbi}");
+                configureArgs.Add($"-DANDROID_PLATFORM={AndroidPlatform}");
+            }
             RunTool(_cmakeExe, configureArgs, "configuring the native build");
             RunTool(_cmakeExe, new List<string> { "--build", buildDir }, "compiling the drop-in library");
 
-            // CMake names a SHARED target's output lib<name>.dylib; the engine opens
-            // <name>.dylib, the name a NativeAOT publish produces.
-            string builtLibrary = Path.Combine(buildDir, $"lib{assemblyName}.dylib");
+            // CMake names a SHARED target's output lib<name>.<ext>. On Apple the
+            // engine opens <name>.dylib — the name a NativeAOT publish produces —
+            // so the lib prefix is dropped when staging. On Android it opens the
+            // bare soname lib<name>.so and lets the linker find it in the APK's
+            // lib/<abi>/, so there the prefix is the whole point: keep it.
+            string libExt = targetsAndroid ? "so" : "dylib";
+            string builtLibrary = Path.Combine(buildDir, $"lib{targetName}.{libExt}");
             if (!File.Exists(builtLibrary))
             {
                 throw new InvalidOperationException(
@@ -307,7 +363,8 @@ namespace GodotTools.Export
             }
 
             RecreateDirectory(stageDir);
-            string stagedLibrary = Path.Combine(stageDir, $"{assemblyName}.dylib");
+            string stagedName = targetsAndroid ? $"lib{assemblyName}.so" : $"{assemblyName}.dylib";
+            string stagedLibrary = Path.Combine(stageDir, stagedName);
             File.Copy(builtLibrary, stagedLibrary, overwrite: true);
 
             if (targetsIOS)
@@ -372,6 +429,97 @@ namespace GodotTools.Export
                 var other => throw new NotSupportedException(
                     $"The dn2cpp export backend does not support the host architecture '{other}'."),
             };
+        }
+
+        /// <summary>
+        /// The NDK the Android cross-build compiles through: whatever the
+        /// environment names (ANDROID_NDK_ROOT / ANDROID_NDK_HOME — what a
+        /// terminal-launched editor and every CI script already set), else the
+        /// newest NDK installed under the Android SDK the export itself uses.
+        /// The check is the toolchain file cmake is actually handed, not the
+        /// directory: an SDK with an `ndk/` holding a half-removed version would
+        /// otherwise resolve to a path that fails at configure time.
+        /// </summary>
+        private static string ResolveAndroidNdk()
+        {
+            var probed = new List<string>();
+
+            foreach (string name in new[] { "ANDROID_NDK_ROOT", "ANDROID_NDK_HOME" })
+            {
+                string? fromEnv = System.Environment.GetEnvironmentVariable(name);
+                if (string.IsNullOrEmpty(fromEnv))
+                    continue;
+                if (HasNdkToolchainFile(fromEnv))
+                    return fromEnv;
+                probed.Add($"{name}={fromEnv}");
+            }
+
+            string sdkPath = GetAndroidSdkPath();
+            if (sdkPath.Length > 0)
+            {
+                string ndkParent = Path.Combine(sdkPath, "ndk");
+                if (Directory.Exists(ndkParent))
+                {
+                    // Newest first: the directory names are NDK versions, and
+                    // ordinal-descending puts the highest one at the front (they
+                    // are zero-padded and equal-width, so no version parse is owed).
+                    foreach (string candidate in Directory.GetDirectories(ndkParent)
+                                 .OrderByDescending(d => Path.GetFileName(d), StringComparer.Ordinal))
+                    {
+                        if (HasNdkToolchainFile(candidate))
+                            return candidate;
+                    }
+                }
+                probed.Add($"the editor's Android SDK ({ndkParent})");
+            }
+
+            throw new NotSupportedException(
+                "The dn2cpp export backend cross-compiles for Android through the NDK's own CMake toolchain " +
+                "file, and no NDK was found" +
+                (probed.Count > 0 ? $" (looked at: {string.Join("; ", probed)})" : "") + ".\n" +
+                "Install one from the Android SDK manager, then either set ANDROID_NDK_ROOT or point " +
+                "'export/android/android_sdk_path' (Editor Settings) at the SDK that holds it.");
+        }
+
+        private static bool HasNdkToolchainFile(string ndkRoot) =>
+            File.Exists(Path.Combine(ndkRoot, "build", "cmake", "android.toolchain.cmake"));
+
+        /// <summary>
+        /// The assembly name, reduced to the character set CMake allows in a target
+        /// name (<c>[A-Za-z0-9_.+-]</c>). Only the build target is renamed — the
+        /// library that ships keeps the assembly's own name, which is the one the
+        /// engine opens.
+        /// </summary>
+        private static string SanitizeCMakeTarget(string assemblyName)
+        {
+            var sanitized = new StringBuilder(assemblyName.Length);
+            foreach (char c in assemblyName)
+            {
+                sanitized.Append(char.IsAsciiLetterOrDigit(c) || c is '_' or '.' or '+' or '-' ? c : '_');
+            }
+
+            return sanitized.ToString();
+        }
+
+        /// <summary>
+        /// The Android SDK the editor's own Android export is configured with —
+        /// the same one the NDK is expected to live under.
+        /// </summary>
+        private static string GetAndroidSdkPath()
+        {
+            try
+            {
+                EditorSettings? settings = EditorInterface.Singleton?.GetEditorSettings();
+                if (settings is null || !settings.HasSetting("export/android/android_sdk_path"))
+                    return string.Empty;
+
+                return settings.GetSetting("export/android/android_sdk_path").AsString();
+            }
+            catch (InvalidOperationException)
+            {
+                // No editor singleton (the assembly is loaded outside the editor).
+                return string.Empty;
+            }
         }
 
         /// <summary>
