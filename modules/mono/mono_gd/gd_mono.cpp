@@ -643,8 +643,15 @@ void GDMono::initialize() {
 
 	godot_plugins_initialize_fn godot_plugins_initialize = nullptr;
 
-#if !defined(APPLE_EMBEDDED_ENABLED)
+#if !defined(APPLE_EMBEDDED_ENABLED) && !defined(WEB_ENABLED)
 	// Check that the .NET assemblies directory exists before trying to use it.
+	//
+	// The Web has no such directory, and cannot have one. There the game ships as
+	// a WebAssembly side module that the loader has already fetched and registered
+	// before main() runs, and open_dynamic_library() resolves it by bare file name
+	// (OS_Web strips the directory), so the load never reaches a file system.
+	// Asserting on a directory that is meaningless on the platform would reject a
+	// perfectly loadable game before try_load_native_aot_library() is even called.
 	if (!DirAccess::exists(GodotSharpDirs::get_api_assemblies_dir())) {
 		OS::get_singleton()->alert(vformat(RTR("Unable to find the .NET assemblies directory.\nMake sure the '%s' directory exists and contains the .NET assemblies."), GodotSharpDirs::get_api_assemblies_dir()), RTR(".NET assemblies not found"));
 		ERR_FAIL_MSG(".NET: Assemblies not found");
