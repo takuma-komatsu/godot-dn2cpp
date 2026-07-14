@@ -49,21 +49,44 @@ namespace GodotTools.Export
         private const string AndroidPlatform = "android-24";
         private const string AndroidAbi = "arm64-v8a";
 
+        /// <summary>
+        /// The one architecture the Web platform has. It never reaches a compiler —
+        /// Emscripten decides what wasm it emits — but it is the name the export and
+        /// the engine agree on, so it is what the drop-in is keyed on.
+        /// </summary>
+        private const string WebArch = "wasm32";
+
+        /// <summary>
+        /// The cmake versions — half-open ranges, [First, PastLast) — on which
+        /// Emscripten's own CMake platform module sets
+        /// <c>TARGET_SUPPORTS_SHARED_LIBS</c> to <see langword="false"/>.
+        /// </summary>
+        private static readonly (Version First, Version PastLast)[] CMakeVersionsWithoutWasmSharedLibs =
+        {
+            (new Version(4, 2, 0), new Version(4, 2, 6)),
+            (new Version(4, 3, 0), new Version(4, 3, 3)),
+        };
+
         /// <summary>How much of the tool output to quote back in an error message.</summary>
         private const int LogTailLines = 30;
 
         private readonly Dn2CppToolchain _toolchain;
         private readonly string _cmakeExe;
+        private readonly string _godotPlatform;
         private readonly string? _androidNdkRoot;
+        private readonly string? _emcmakeExe;
         private readonly string _logPath;
         private readonly StreamWriter _log;
         private readonly Queue<string> _logTail = new Queue<string>();
 
-        private Dn2CppExporter(Dn2CppToolchain toolchain, string cmakeExe, string? androidNdkRoot)
+        private Dn2CppExporter(Dn2CppToolchain toolchain, string cmakeExe, string godotPlatform,
+            string? androidNdkRoot, string? emcmakeExe)
         {
             _toolchain = toolchain;
             _cmakeExe = cmakeExe;
+            _godotPlatform = godotPlatform;
             _androidNdkRoot = androidNdkRoot;
+            _emcmakeExe = emcmakeExe;
 
             string timestamp = DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
             string logsDir = Path.Combine(GodotSharpDirs.ProjectBaseOutputPath, "dn2cpp", "logs");
@@ -152,11 +175,28 @@ namespace GodotTools.Export
                         "Enable 'architectures/arm64-v8a' alone in the preset.");
                 }
             }
+            else if (godotPlatform == OS.Platforms.Web)
+            {
+                // Emscripten cross-targets wasm through its own CMake toolchain
+                // file, so the host architecture is no constraint here — and wasm32
+                // is the only architecture the Web platform has, so a preset naming
+                // anything else named it itself.
+                if (archs.Count != 1 || archs.First() != WebArch)
+                {
+                    throw new NotSupportedException(
+                        $"The dn2cpp export backend supports only the {WebArch} architecture on Web" +
+                        (archs.Count == 0
+                            ? ", and this preset selects none. "
+                            : $", and this preset targets {DescribeArchs(archs)}. ") +
+                        "Keep architecture names out of 'custom_features'.");
+                }
+            }
             else
             {
                 throw new NotSupportedException(
-                    $"The dn2cpp export backend supports macOS, iOS and Android only for now, not '{godotPlatform}'. " +
-                    "Switch 'dotnet/export_backend' to 'Host Runtime' or 'NativeAOT' for this preset.");
+                    $"The dn2cpp export backend supports macOS, iOS, Android and Web only for now, not " +
+                    $"'{godotPlatform}'. Switch 'dotnet/export_backend' to 'Host Runtime' or 'NativeAOT' for this " +
+                    "preset.");
             }
 
             var missingTools = new List<string>();
@@ -178,7 +218,7 @@ namespace GodotTools.Export
                     "invisible to it even when a terminal finds them.");
             }
 
-            VerifyCMakeVersion(cmakeExe!);
+            Version cmakeVersion = VerifyCMakeVersion(cmakeExe!);
 
             if (godotPlatform == OS.Platforms.iOS)
             {
@@ -189,14 +229,18 @@ namespace GodotTools.Export
                 VerifyAppleSdk("iphonesimulator");
             }
 
+            if (godotPlatform == OS.Platforms.Web)
+                VerifyCMakeCanBuildWasmSharedLibs(cmakeExe!, cmakeVersion);
+
             // Resolved here, for the same reason: an absent NDK is a refusal
             // before the publish, not a cmake error twenty minutes in.
             string? androidNdkRoot = godotPlatform == OS.Platforms.Android ? ResolveAndroidNdk() : null;
+            string? emcmakeExe = godotPlatform == OS.Platforms.Web ? ResolveEmscripten() : null;
 
             if (!Dn2CppToolchain.TryResolve(out Dn2CppToolchain? toolchain, out string toolchainError))
                 throw new NotSupportedException(toolchainError);
 
-            return new Dn2CppExporter(toolchain, cmakeExe!, androidNdkRoot);
+            return new Dn2CppExporter(toolchain, cmakeExe!, godotPlatform, androidNdkRoot, emcmakeExe);
         }
 
         /// <summary>
@@ -218,16 +262,32 @@ namespace GodotTools.Export
             // every one of them, so each combination is re-checked here. iOS
             // libraries are cross-compiled, so there the check is that the
             // architecture agrees with the runtime identifier it is built under;
-            // everywhere else the library is host-compiled, and a foreign
-            // architecture reaching here would stage a library into another
-            // architecture's data directory, where the engine would load it on
-            // no machine at all.
+            // the Web's runtime identifier encodes no target architecture at all,
+            // so there it is the platform that answers; everywhere else the library
+            // is host-compiled, and a foreign architecture reaching here would stage
+            // a library into another architecture's data directory, where the engine
+            // would load it on no machine at all.
             bool targetsIOS = runtimeIdentifier.StartsWith("ios", StringComparison.Ordinal);
             // Android publishes under either RID family: android-* by default,
             // linux-bionic-* when 'dotnet/android_use_linux_bionic' is on.
             bool targetsAndroid = runtimeIdentifier.StartsWith("android-", StringComparison.Ordinal)
                 || runtimeIdentifier.StartsWith("linux-bionic-", StringComparison.Ordinal);
-            if (targetsIOS || targetsAndroid)
+            // The Web is the one target whose runtime identifier says nothing about
+            // what is being built: the publish runs under the HOST's RID, on purpose
+            // (see the export plugin), and the wasm is Emscripten's doing rather than
+            // the RID's. So it is read off the platform Create was given, which is
+            // the only place that still knows.
+            bool targetsWeb = _godotPlatform == OS.Platforms.Web;
+            if (targetsWeb)
+            {
+                if (arch != WebArch)
+                {
+                    throw new InvalidOperationException(
+                        $"The dn2cpp export backend compiles the Web game for '{WebArch}', but the export is " +
+                        $"packaging '{arch}'.");
+                }
+            }
+            else if (targetsIOS || targetsAndroid)
             {
                 string ridArch = arch switch
                 {
@@ -253,7 +313,13 @@ namespace GodotTools.Export
             }
 
             string workDir = Path.Combine(MonoDataDir, "dn2cpp");
-            string slot = $"{buildConfig}-{runtimeIdentifier}";
+            // The Godot platform is part of the slot, not just the build config and
+            // the runtime identifier. The Web builds under the host's RID, so a macOS
+            // export and a Web export of one project would otherwise land in the same
+            // build directory — and one directory cannot hold both a native CMakeCache
+            // and an Emscripten one. cmake either refuses the changed compiler outright
+            // or, worse, reuses the cached one and builds the wrong thing.
+            string slot = $"{_godotPlatform}-{buildConfig}-{runtimeIdentifier}";
             string ilDir = Path.Combine(workDir, "il", slot);
             string genDir = Path.Combine(workDir, "gen", slot);
             string buildDir = Path.Combine(workDir, "build", slot);
@@ -346,7 +412,32 @@ namespace GodotTools.Export
                 configureArgs.Add($"-DANDROID_ABI={AndroidAbi}");
                 configureArgs.Add($"-DANDROID_PLATFORM={AndroidPlatform}");
             }
-            RunTool(_cmakeExe, configureArgs, "configuring the native build");
+            else if (targetsWeb)
+            {
+                // The Boehm GC scans the stack and registers conservatively, which
+                // has no sound implementation on wasm; the runtime's CMake refuses
+                // to configure for Emscripten with the GC on rather than build a
+                // collector that would free live objects. The calloc fallback is the
+                // supported mode there.
+                configureArgs.Add("-DDN2CPP_USE_GC=OFF");
+            }
+
+            if (targetsWeb)
+            {
+                // emcmake runs cmake with Emscripten's own CMake toolchain file
+                // injected, which is what selects em++, the wasm target and the
+                // side-module link together — the same reason the Android arm above
+                // spells no compiler either. Only the configure is wrapped: the
+                // cache it writes carries the toolchain into every later build.
+                var emcmakeArgs = new List<string> { _cmakeExe };
+                emcmakeArgs.AddRange(configureArgs);
+                RunTool(_emcmakeExe!, emcmakeArgs, "configuring the native build");
+            }
+            else
+            {
+                RunTool(_cmakeExe, configureArgs, "configuring the native build");
+            }
+
             RunTool(_cmakeExe, new List<string> { "--build", buildDir }, "compiling the drop-in library");
 
             // CMake names a SHARED target's output lib<name>.<ext>. On Apple the
@@ -354,7 +445,18 @@ namespace GodotTools.Export
             // so the lib prefix is dropped when staging. On Android it opens the
             // bare soname lib<name>.so and lets the linker find it in the APK's
             // lib/<abi>/, so there the prefix is the whole point: keep it.
-            string libExt = targetsAndroid ? "so" : "dylib";
+            //
+            // On the Web the prefix goes, for a third reason. Emscripten names the
+            // side module lib<name>.so like any other SHARED target, but the engine
+            // asks for <name>.so: there is no web branch in
+            // try_load_native_aot_library, so the Web takes the UNIX_ENABLED one.
+            // That name is never opened as a path — OS_Web strips the directory and
+            // dlopens the bare file name, which resolves out of the loader's registry
+            // of libraries it preloaded before main(), keyed on the file name the Web
+            // exporter copied next to index.html. That is the staged file's name. So
+            // the staged file must be exactly <assembly>.so: on this platform the
+            // name is not a convention, it is the entire lookup.
+            string libExt = targetsAndroid || targetsWeb ? "so" : "dylib";
             string builtLibrary = Path.Combine(buildDir, $"lib{targetName}.{libExt}");
             if (!File.Exists(builtLibrary))
             {
@@ -363,7 +465,9 @@ namespace GodotTools.Export
             }
 
             RecreateDirectory(stageDir);
-            string stagedName = targetsAndroid ? $"lib{assemblyName}.so" : $"{assemblyName}.dylib";
+            string stagedName = targetsAndroid ? $"lib{assemblyName}.so"
+                : targetsWeb ? $"{assemblyName}.so"
+                : $"{assemblyName}.dylib";
             string stagedLibrary = Path.Combine(stageDir, stagedName);
             File.Copy(builtLibrary, stagedLibrary, overwrite: true);
 
@@ -485,6 +589,38 @@ namespace GodotTools.Export
             File.Exists(Path.Combine(ndkRoot, "build", "cmake", "android.toolchain.cmake"));
 
         /// <summary>
+        /// The Emscripten SDK the Web cross-build compiles through, resolved to the
+        /// <c>emcmake</c> the configure runs under. <c>em++</c> is probed beside it
+        /// because emcmake alone proves nothing: it is a thin wrapper that would
+        /// hand cmake a toolchain file naming a compiler that is not there, and the
+        /// failure would land in cmake's compiler check with nothing pointing at the
+        /// SDK.
+        /// </summary>
+        private static string ResolveEmscripten()
+        {
+            string? emcmakeExe = OS.PathWhich("emcmake");
+
+            var missingTools = new List<string>();
+            if (emcmakeExe is null)
+                missingTools.Add("emcmake");
+            if (OS.PathWhich("em++") is null)
+                missingTools.Add("em++");
+
+            if (missingTools.Count > 0)
+            {
+                throw new NotSupportedException(
+                    "The dn2cpp export backend compiles the game for the Web with Emscripten, which is not on " +
+                    $"PATH: {string.Join(", ", missingTools)}.\n" +
+                    "Install the Emscripten SDK ('brew install emscripten', or emsdk's own installer), activate " +
+                    "it in the environment the editor is launched from ('source /path/to/emsdk/emsdk_env.sh'), " +
+                    "and restart the editor. An editor launched from Finder inherits a minimal PATH, so an SDK a " +
+                    "terminal finds can be invisible to it.");
+            }
+
+            return emcmakeExe!;
+        }
+
+        /// <summary>
         /// The assembly name, reduced to the character set CMake allows in a target
         /// name (<c>[A-Za-z0-9_.+-]</c>). Only the build target is renamed — the
         /// library that ships keeps the assembly's own name, which is the one the
@@ -548,7 +684,11 @@ namespace GodotTools.Export
             }
         }
 
-        private static void VerifyCMakeVersion(string cmakeExe)
+        /// <summary>
+        /// Verifies the cmake floor every target shares, and hands back the version
+        /// it read — the Web has a second, narrower question to ask of it.
+        /// </summary>
+        private static Version VerifyCMakeVersion(string cmakeExe)
         {
             string firstLine = CaptureToolOutput(cmakeExe, "--version").Split('\n').FirstOrDefault() ?? string.Empty;
 
@@ -570,6 +710,41 @@ namespace GodotTools.Export
                 throw new NotSupportedException(
                     $"The dn2cpp export backend needs cmake {RequiredCMakeMajor}.{RequiredCMakeMinor} or newer, " +
                     $"but '{cmakeExe}' is {version}.");
+            }
+
+            return version;
+        }
+
+        /// <summary>
+        /// Refuses the cmake versions on which an Emscripten SHARED library is not a
+        /// shared library. Emscripten's CMake platform module turns
+        /// <c>TARGET_SUPPORTS_SHARED_LIBS</c> off on two bands, and on those cmake
+        /// quietly builds <c>add_library(... SHARED ...)</c> as a static archive: the
+        /// configure succeeds, the build succeeds, and the side module the whole Web
+        /// lane exists to produce is simply never written. The only symptom is a
+        /// missing file at staging time, a long way from its cause — so the version
+        /// is refused before anything is transpiled or compiled.
+        /// </summary>
+        private static void VerifyCMakeCanBuildWasmSharedLibs(string cmakeExe, Version version)
+        {
+            foreach ((Version first, Version pastLast) in CMakeVersionsWithoutWasmSharedLibs)
+            {
+                if (version >= first && version < pastLast)
+                {
+                    // The bands are disjoint and ascending, so the last one's upper
+                    // bound is the floor that clears every one of them.
+                    Version clearsAll = CMakeVersionsWithoutWasmSharedLibs[^1].PastLast;
+
+                    throw new NotSupportedException(
+                        $"cmake {version} ('{cmakeExe}') cannot build the WebAssembly side module a C# Web export " +
+                        "is. On cmake " +
+                        string.Join(" and ", CMakeVersionsWithoutWasmSharedLibs
+                            .Select(band => $"[{band.First}, {band.PastLast})")) +
+                        ", Emscripten's CMake platform module reports that the target does not support shared " +
+                        "libraries, so a shared library is silently built as a static archive instead — and the " +
+                        "drop-in the engine has to load is never produced. Install a cmake outside those ranges " +
+                        $"({clearsAll} or newer clears all of them).");
+                }
             }
         }
 

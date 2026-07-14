@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using GodotTools.Build;
@@ -212,10 +213,24 @@ namespace GodotTools.Export
             if (!TryDeterminePlatformFromOSName(osName, out string? platform))
                 throw new NotSupportedException("Target platform not supported.");
 
-            if (!new[] { OS.Platforms.Windows, OS.Platforms.LinuxBSD, OS.Platforms.MacOS, OS.Platforms.Android, OS.Platforms.iOS }
+            if (!new[]
+                    {
+                        OS.Platforms.Windows, OS.Platforms.LinuxBSD, OS.Platforms.MacOS, OS.Platforms.Android,
+                        OS.Platforms.iOS, OS.Platforms.Web,
+                    }
                     .Contains(platform))
             {
                 throw new NotImplementedException("Target platform not yet implemented.");
+            }
+
+            var exportBackend = (ExportBackend)(int)GetOption("dotnet/export_backend");
+
+            // Read before anything is published: every way the Web can fail is a
+            // preset checkbox, and finding that out after a transpile and a native
+            // build is finding it out the slow way.
+            if (platform == OS.Platforms.Web)
+            {
+                VerifyWebPreset(exportBackend, features);
             }
 
             bool useAndroidLinuxBionic = (bool)GetOption("dotnet/android_use_linux_bionic");
@@ -258,7 +273,18 @@ namespace GodotTools.Export
                 }
             }
 
-            var exportBackend = (ExportBackend)(int)GetOption("dotnet/export_backend");
+            if (features.Contains("wasm32"))
+            {
+                if (platform == OS.Platforms.Web)
+                {
+                    // The only architecture the Web platform has. It is not a
+                    // .NET publish architecture — the publish runs under the
+                    // host's runtime identifier, see DetermineRuntimeIdentifierOS —
+                    // but it is the name the export and the engine agree on, so it
+                    // is what the packaging loop below is keyed on.
+                    publishConfig.Archs.Add("wasm32");
+                }
+            }
 
             // Fails before the publish runs, so an unusable target or a missing C++
             // toolchain costs no build time. It is handed the architectures that were
@@ -284,7 +310,15 @@ namespace GodotTools.Export
                 // the drop-in replaces the runtime wholesale, so a self-contained
                 // publish would restore a runtime pack the export then throws
                 // away — minutes of download for bytes nothing packages.
-                ExportBackend.Dn2Cpp when platform == OS.Platforms.iOS || platform == OS.Platforms.Android =>
+                //
+                // The Web wants it for that reason and one of its own: it publishes
+                // under the HOST's runtime identifier, so a self-contained publish
+                // would drop a macOS (or Linux, or Windows) runtime beside the game
+                // IL — an apphost for an operating system the browser is not, and a
+                // second System.Private.CoreLib.dll that would outrank the bundle's
+                // pinned one in the transpiler's --auto-ref search.
+                ExportBackend.Dn2Cpp when platform == OS.Platforms.iOS || platform == OS.Platforms.Android
+                    || platform == OS.Platforms.Web =>
                     new List<string>
                     {
                         "PublishAot=false",
@@ -313,7 +347,15 @@ namespace GodotTools.Export
 
             List<string> outputPaths = new();
 
-            bool embedBuildResults = ((bool)GetOption("dotnet/embed_build_outputs") || platform == OS.Platforms.Android) && platform != OS.Platforms.MacOS;
+            // Not on the Web, whatever the option says. There the drop-in has to
+            // land next to index.html as a file the loader can fetch and register
+            // before main() runs: AddSharedObject is what puts it there (and into
+            // the generated HTML's gdextensionLibs), and nothing ever reads it back
+            // out of the pck. A user who ticks 'embed_build_outputs' would otherwise
+            // get a game whose C# module is packed where no dlopen can reach it —
+            // an export that succeeds and produces a game that cannot start.
+            bool embedBuildResults = ((bool)GetOption("dotnet/embed_build_outputs") || platform == OS.Platforms.Android)
+                && platform != OS.Platforms.MacOS && platform != OS.Platforms.Web;
 
             var exportedJars = new HashSet<string>();
 
@@ -577,6 +619,32 @@ namespace GodotTools.Export
             {
                 return OS.DotNetOS.LinuxBionic;
             }
+
+            if (platform == OS.Platforms.Web)
+            {
+                // Not 'browser'. The Web publishes the game IL under the HOST's
+                // runtime identifier, and that is deliberate.
+                //
+                // dn2cpp — the only backend the Web accepts — consumes IL and
+                // nothing else. It takes its framework closure from the toolchain
+                // bundle's pinned ref/, and Emscripten compiles the C++ it emits,
+                // so the publish RID is a private, publish-only key: it selects an
+                // apphost and a runtime pack, both of which this backend switches
+                // off. 'browser-wasm' would demand the wasm-tools workload, resolve
+                // a Mono-flavoured CoreLib and move MSBuild's defaults — that is,
+                // it would change the IL we transpile, which is the one input that
+                // must not vary with the target.
+                //
+                // Nothing downstream reads the RID back. The names the engine has
+                // to agree with are built from 'arch', which stays 'wasm32':
+                // data_{proj}_{platform}_{arch} and res://.godot/mono/publish/{arch}
+                // here, _get_platform_name() and Engine::get_architecture_name() —
+                // 'web' and 'wasm32' — there. Nor do the game's own platform defines
+                // move: the publish is handed GodotTargetPlatform=web explicitly, so
+                // GODOT_WEB is defined by the platform and never inferred from a RID.
+                return DetermineHostRuntimeIdentifierOS();
+            }
+
             return OS.DotNetOSPlatformMap[platform];
         }
 
@@ -592,8 +660,91 @@ namespace GodotTools.Export
                 "arm64-v8a" => "arm64",
                 "arm32" => "arm",
                 "arm64" => "arm64",
+                // The other half of the host RID; see DetermineRuntimeIdentifierOS.
+                // 'wasm32' survives untranslated everywhere the engine can see it.
+                "wasm32" => DetermineHostRuntimeIdentifierArch(),
                 _ => throw new ArgumentOutOfRangeException(nameof(arch), arch, "Unexpected architecture")
             };
+        }
+
+        /// <summary>
+        /// The RID operating system of the machine running the editor. Only the Web
+        /// publishes under it — see <see cref="DetermineRuntimeIdentifierOS"/> for why.
+        /// </summary>
+        private static string DetermineHostRuntimeIdentifierOS()
+        {
+            if (OS.IsWindows)
+                return OS.DotNetOS.Win;
+            if (OS.IsMacOS)
+                return OS.DotNetOS.OSX;
+            if (OS.IsLinuxBSD)
+                return OS.DotNetOS.Linux;
+
+            throw new NotSupportedException(
+                "The Web export publishes the game IL under the host's runtime identifier, and this host is not a " +
+                "supported .NET publish host.");
+        }
+
+        /// <summary>
+        /// The RID architecture of the machine running the editor. The companion of
+        /// <see cref="DetermineHostRuntimeIdentifierOS"/>.
+        /// </summary>
+        private static string DetermineHostRuntimeIdentifierArch()
+        {
+            return RuntimeInformation.ProcessArchitecture switch
+            {
+                Architecture.X86 => "x86",
+                Architecture.X64 => "x64",
+                Architecture.Arm => "arm",
+                Architecture.Arm64 => "arm64",
+                var other => throw new NotSupportedException(
+                    "The Web export publishes the game IL under the host's runtime identifier, and the host " +
+                    $"architecture '{other}' is not a supported .NET publish architecture."),
+            };
+        }
+
+        /// <summary>
+        /// Refuses the Web preset combinations that cannot produce a game that runs.
+        /// Every one of them is a checkbox the user can flip, so each says which.
+        /// </summary>
+        private static void VerifyWebPreset(ExportBackend exportBackend, string[] features)
+        {
+            // The Web has no .NET runtime: no hostfxr, no coreclr. GDMono can only
+            // reach the game's C# through try_load_native_aot_library, which dlopens
+            // an ahead-of-time compiled drop-in — and dn2cpp is what produces one.
+            // The other two backends would leave managed assemblies (or a native
+            // library built for an operating system the browser is not) in the
+            // publish directory, and the packaging below would hand every one of
+            // them to the Web exporter, which stages them flat next to index.html
+            // and asks the loader to open each as a WebAssembly side module.
+            if (exportBackend != ExportBackend.Dn2Cpp)
+            {
+                throw new NotSupportedException(
+                    "A C# project can only be exported to Web with the dn2cpp export backend: the Web has no .NET " +
+                    "runtime to load published assemblies with. Set 'dotnet/export_backend' to 'dn2cpp' in the " +
+                    "export preset.");
+            }
+
+            // The drop-in is a WebAssembly side module, and only a dlink engine
+            // build can dlopen one at all.
+            if (!features.Contains("web_extensions"))
+            {
+                throw new NotSupportedException(
+                    "A C# Web export needs 'Extensions Support' enabled in the export preset: the compiled game " +
+                    "is loaded as a WebAssembly side module, which only the extensions ('dlink') export template " +
+                    "can open.");
+            }
+
+            // The drop-in is compiled without -pthread, and Emscripten refuses to
+            // load a non-pthread side module into a pthread main module — the game
+            // would be fetched, and then fail in the loader before main() runs.
+            if (!features.Contains("nothreads"))
+            {
+                throw new NotSupportedException(
+                    "A C# Web export needs 'Thread Support' disabled in the export preset: the compiled game is " +
+                    "single-threaded, and Emscripten will not load a non-pthread side module into a threaded " +
+                    "main module.");
+            }
         }
 
         public override void _ExportEnd()
