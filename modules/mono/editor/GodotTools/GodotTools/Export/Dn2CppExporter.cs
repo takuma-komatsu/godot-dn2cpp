@@ -425,15 +425,6 @@ namespace GodotTools.Export
                 configureArgs.Add($"-DANDROID_ABI={AndroidAbi}");
                 configureArgs.Add($"-DANDROID_PLATFORM={AndroidPlatform}");
             }
-            else if (targetsWeb)
-            {
-                // The Boehm GC scans the stack and registers conservatively, which
-                // has no sound implementation on wasm; the runtime's CMake refuses
-                // to configure for Emscripten with the GC on rather than build a
-                // collector that would free live objects. The calloc fallback is the
-                // supported mode there.
-                configureArgs.Add("-DDN2CPP_USE_GC=OFF");
-            }
 
             if (targetsWeb)
             {
