@@ -371,7 +371,25 @@ namespace GodotTools.Export
             // naming itself and '--reflection-root', rather than answering an empty member list) —
             // so nothing but the Web pays for it.
             if (targetsWeb)
+            {
                 transpileArgs.Add("--trim-reflection");
+                // Second Web-only size lever (dn2cpp SZ-12), same relocation budget as
+                // above: the real GodotSharp's Godot.Constructors..cctor roots every
+                // engine-wrapper class through its 955 registry lambdas — ~69% of a
+                // small game's type-infos and thousands of never-called wrapper bodies,
+                // with methtab_Godot_Constructors___c alone contributing 5,730 of the
+                // side module's data relocations. Under this flag only the wrappers the
+                // game actually names stay; every other registry lambda is redirected
+                // to the nearest named ancestor's, so the 955-key registry (and its
+                // loud missing-name throw) is preserved and an unnamed class's engine
+                // object is wrapped as its nearest named ancestor — correct for every
+                // cast/is the game can express, with GetType().Name-style string
+                // reflection over never-named wrappers as the documented residue (the
+                // same constraint bucket as --trim-reflection; '--godot-class-root
+                // <Godot.Full.Name>' is the escape hatch for a class only ever named
+                // from data).
+                transpileArgs.Add("--trim-godot-classes");
+            }
             transpileArgs.Add("-o");
             transpileArgs.Add(genDir);
             RunTool(_toolchain.Dn2CppExe, transpileArgs, "transpiling the game assembly");
