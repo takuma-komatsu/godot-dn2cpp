@@ -55,6 +55,11 @@ def get_opts():
         BoolVariable(
             "dlink_enabled", "Enable WebAssembly dynamic linking (GDExtension support). Produces bigger binaries", False
         ),
+        (
+            "dlink_main_extra_libs",
+            "Comma-separated static libraries to whole-archive link into the main module only (dlink builds)",
+            "",
+        ),
         BoolVariable("use_closure_compiler", "Use closure compiler to minimize JavaScript code", False),
         BoolVariable(
             "proxy_to_pthread",

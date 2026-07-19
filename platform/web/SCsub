@@ -91,8 +91,25 @@ if env["dlink_enabled"]:
     sys_env["CCFLAGS"].remove("-fvisibility=hidden")
     sys_env["LINKFLAGS"].remove("-fvisibility=hidden")
 
+    # Extra static libraries linked whole into the MAIN module only. This is
+    # the one link where a non-PIC archive can live: wasm-ld rejects its
+    # relocations in any side module, and custom `linkflags` reach the
+    # side-module link too, so they cannot express a main-only input. Passed
+    # as bare inputs, deliberately without a -Wl,--whole-archive sandwich:
+    # under MAIN_MODULE=1 emcc already wraps the entire input set (system
+    # libraries included) in one --whole-archive region, so a bare input is
+    # fully included and exported (EXPORT_ALL above) for side modules to
+    # import — while an explicit -Wl,--no-whole-archive would close emcc's
+    # own region early and silently drop the exported libc/libc++ surface
+    # side modules rely on.
+    main_extra_libs = [env.File(lib) for lib in env["dlink_main_extra_libs"].split(",") if lib]
+    for lib in main_extra_libs:
+        sys_env.Append(LINKFLAGS=[lib.abspath])
+
     # The main emscripten runtime, with exported standard libraries.
     sys = sys_env.add_program(build_targets, ["web_runtime.cpp"])
+    for lib in main_extra_libs:
+        sys_env.Depends(sys[0], lib)
 
     # The side library, containing all Godot code.
     wasm = env.add_program("#bin/godot.side${PROGSUFFIX}.wasm", web_files)
