@@ -57,6 +57,32 @@ namespace GodotTools.Export
         private const string ExtraTranspileArgsSetting = "dotnet/dn2cpp/extra_transpile_args";
 
         /// <summary>
+        /// Project setting (PackedStringArray) of extra link options for the
+        /// drop-in build, passed to the configure as
+        /// <c>-DDN2CPP_APP_LINK_FLAGS</c> (space-joined; the runtime's CMake
+        /// applies them via <c>target_link_options</c>) — e.g. ["-L/path/to/libs"].
+        /// </summary>
+        private const string ExtraLinkFlagsSetting = "dotnet/dn2cpp/extra_link_flags";
+
+        /// <summary>
+        /// Project setting (PackedStringArray) of extra link inputs for the
+        /// drop-in build, passed to the configure as
+        /// <c>-DDN2CPP_APP_LINK_LIBS</c> (space-joined; the runtime's CMake
+        /// applies them via <c>target_link_libraries</c>) — library tokens or
+        /// full archive paths, e.g. a binding SDK's static library.
+        /// </summary>
+        private const string ExtraLinkLibsSetting = "dotnet/dn2cpp/extra_link_libs";
+
+        /// <summary>
+        /// Project setting (PackedStringArray) of native library paths staged
+        /// beside the drop-in, so the platform exporter packages them the same
+        /// way — into the APK's lib/&lt;abi&gt;/ on Android, next to the data
+        /// directory elsewhere — e.g. a binding SDK's shared objects the
+        /// drop-in links against or dlopens.
+        /// </summary>
+        private const string ExtraSharedObjectsSetting = "dotnet/dn2cpp/extra_shared_objects";
+
+        /// <summary>
         /// The one architecture the Web platform has. It never reaches a compiler —
         /// Emscripten decides what wasm it emits — but it is the name the export and
         /// the engine agree on, so it is what the drop-in is keyed on.
@@ -256,7 +282,9 @@ namespace GodotTools.Export
         /// caller packages its contents into the project data directory.
         /// </summary>
         /// <remarks>
-        /// The directory deliberately holds nothing else. The engine only reaches
+        /// The directory holds nothing else, except native libraries the project
+        /// declares through <see cref="ExtraSharedObjectsSetting"/>. In particular
+        /// never a managed runtime: the engine only reaches
         /// <c>try_load_native_aot_library</c> when it finds no hostfxr and no
         /// coreclr next to the game, so shipping the publish directory's runtime
         /// alongside would route the exported game straight back to the .NET host.
@@ -468,6 +496,22 @@ namespace GodotTools.Export
                 configureArgs.Add($"-DANDROID_PLATFORM={AndroidPlatform}");
             }
 
+            // Project-declared extra native link inputs (PackedStringArray
+            // settings, like the transpile knob above; res:// and user:// entries
+            // are globalized). Both defines are passed on EVERY configure, empty
+            // when unset: the build directory persists across exports and cmake
+            // never resets a cached variable, so an emptied setting must
+            // overwrite the cache rather than leave the previous export's flags
+            // armed.
+            string extraLinkFlags = string.Join(' ', GetPathListSetting(ExtraLinkFlagsSetting));
+            string extraLinkLibs = string.Join(' ', GetPathListSetting(ExtraLinkLibsSetting));
+            if (extraLinkFlags.Length > 0)
+                GD.Print($"dn2cpp: extra link flags (project setting): {extraLinkFlags}");
+            if (extraLinkLibs.Length > 0)
+                GD.Print($"dn2cpp: extra link libs (project setting): {extraLinkLibs}");
+            configureArgs.Add($"-DDN2CPP_APP_LINK_FLAGS={extraLinkFlags}");
+            configureArgs.Add($"-DDN2CPP_APP_LINK_LIBS={extraLinkLibs}");
+
             if (targetsWeb)
             {
                 // emcmake runs cmake with Emscripten's own CMake toolchain file
@@ -529,7 +573,49 @@ namespace GodotTools.Export
             LogLine($"staged {stagedLibrary}");
             GD.Print($"dn2cpp: staged {stagedLibrary}");
 
+            // Project-declared extra native libraries, staged beside the drop-in
+            // so the platform exporter packages them by the same rules it
+            // packages the drop-in itself (Android tags shared objects into the
+            // APK's lib/<abi>/; the Web copies them next to index.html and
+            // preloads them). A missing path is an error, not a skip: a typo
+            // silently shipping a game without its native library would surface
+            // as a dlopen failure on a player's machine, the one place this
+            // diagnostic cannot reach anybody.
+            foreach (string sharedObject in GetPathListSetting(ExtraSharedObjectsSetting))
+            {
+                if (!File.Exists(sharedObject))
+                {
+                    throw new InvalidOperationException(
+                        $"The '{ExtraSharedObjectsSetting}' project setting names '{sharedObject}', which does " +
+                        "not exist.");
+                }
+
+                string stagedSharedObject = Path.Combine(stageDir, Path.GetFileName(sharedObject));
+                File.Copy(sharedObject, stagedSharedObject, overwrite: true);
+                LogLine($"staged {stagedSharedObject}");
+                GD.Print($"dn2cpp: staged extra shared object {stagedSharedObject}");
+            }
+
             return stageDir;
+        }
+
+        /// <summary>
+        /// A PackedStringArray project setting read as a list, with res:// and
+        /// user:// entries globalized to filesystem paths. Empty when the
+        /// setting is absent.
+        /// </summary>
+        private static string[] GetPathListSetting(string settingName)
+        {
+            if (!ProjectSettings.HasSetting(settingName))
+                return Array.Empty<string>();
+
+            return ProjectSettings.GetSetting(settingName).AsStringArray()
+                .Select(entry =>
+                    entry.StartsWith("res://", StringComparison.Ordinal)
+                    || entry.StartsWith("user://", StringComparison.Ordinal)
+                        ? ProjectSettings.GlobalizePath(entry)
+                        : entry)
+                .ToArray();
         }
 
         /// <summary>
