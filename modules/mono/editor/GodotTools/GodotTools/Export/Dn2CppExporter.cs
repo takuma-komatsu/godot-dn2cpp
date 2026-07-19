@@ -50,6 +50,13 @@ namespace GodotTools.Export
         private const string AndroidAbi = "arm64-v8a";
 
         /// <summary>
+        /// Project setting (PackedStringArray) appended verbatim to the transpiler
+        /// invocation, e.g. ["--pinvoke-module", "cri_atom"] for a game binding an
+        /// external native library through a referenced assembly.
+        /// </summary>
+        private const string ExtraTranspileArgsSetting = "dotnet/dn2cpp/extra_transpile_args";
+
+        /// <summary>
         /// The one architecture the Web platform has. It never reaches a compiler —
         /// Emscripten decides what wasm it emits — but it is the name the export and
         /// the engine agree on, so it is what the drop-in is keyed on.
@@ -389,6 +396,23 @@ namespace GodotTools.Export
                 // <Godot.Full.Name>' is the escape hatch for a class only ever named
                 // from data).
                 transpileArgs.Add("--trim-godot-classes");
+            }
+            // Project-declared extra transpiler arguments (the
+            // "dotnet/dn2cpp/extra_transpile_args" project setting, a
+            // PackedStringArray): the route for a per-project flag the exporter has
+            // no dedicated knob for — e.g. "--pinvoke-module cri_atom" when the game
+            // binds an external native library through a referenced binding assembly.
+            // A PROJECT setting, deliberately not an environment variable: the flags
+            // change the C++ a successful transpile emits, and they belong to the
+            // game, versioned with it, visible in its project.godot.
+            if (ProjectSettings.HasSetting(ExtraTranspileArgsSetting))
+            {
+                string[] extraArgs = ProjectSettings.GetSetting(ExtraTranspileArgsSetting).AsStringArray();
+                if (extraArgs.Length > 0)
+                {
+                    GD.Print($"dn2cpp: extra transpile args (project setting): {string.Join(' ', extraArgs)}");
+                    transpileArgs.AddRange(extraArgs);
+                }
             }
             transpileArgs.Add("-o");
             transpileArgs.Add(genDir);
