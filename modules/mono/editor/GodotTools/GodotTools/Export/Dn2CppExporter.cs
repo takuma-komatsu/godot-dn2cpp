@@ -51,8 +51,8 @@ namespace GodotTools.Export
 
         /// <summary>
         /// Project setting (PackedStringArray) appended verbatim to the transpiler
-        /// invocation, e.g. ["--pinvoke-module", "cri_atom"] for a game binding an
-        /// external native library through a referenced assembly.
+        /// invocation, e.g. ["--pinvoke-module", "my_native_lib"] for a game
+        /// binding an external native library through a referenced assembly.
         /// </summary>
         private const string ExtraTranspileArgsSetting = "dotnet/dn2cpp/extra_transpile_args";
 
@@ -428,8 +428,9 @@ namespace GodotTools.Export
             // Project-declared extra transpiler arguments (the
             // "dotnet/dn2cpp/extra_transpile_args" project setting, a
             // PackedStringArray): the route for a per-project flag the exporter has
-            // no dedicated knob for — e.g. "--pinvoke-module cri_atom" when the game
-            // binds an external native library through a referenced binding assembly.
+            // no dedicated knob for — e.g. "--pinvoke-module my_native_lib" when
+            // the game binds an external native library through a referenced
+            // binding assembly.
             // A PROJECT setting, deliberately not an environment variable: the flags
             // change the C++ a successful transpile emits, and they belong to the
             // game, versioned with it, visible in its project.godot.
