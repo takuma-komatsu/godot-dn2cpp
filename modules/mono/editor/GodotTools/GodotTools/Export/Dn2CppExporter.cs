@@ -302,6 +302,26 @@ namespace GodotTools.Export
             if (!Dn2CppToolchain.TryResolve(out Dn2CppToolchain? toolchain, out string toolchainError))
                 throw new NotSupportedException(toolchainError);
 
+            // A cross-target export off a Windows host transpiles the POSIX-flavour
+            // framework, not the bundle's host one (Dn2CppToolchain.NeedsCrossCoreLib
+            // says why). Checked here rather than at the -r, because the alternative
+            // is not a missing file: the transpile SUCCEEDS against the Windows
+            // framework and the failure surfaces as a linker complaining about
+            // -lkernel32, or as an ole32 import no Emscripten link can satisfy —
+            // neither of which names a CoreLib flavour, an export backend, or this
+            // sentence.
+            if (Dn2CppToolchain.NeedsCrossCoreLib(godotPlatform)
+                && !File.Exists(toolchain.CrossCoreLibRef))
+            {
+                throw new NotSupportedException(
+                    $"The dn2cpp toolchain at '{toolchain.RootDir}' ({toolchain.Source}) carries no " +
+                    $"POSIX framework, which an export to '{godotPlatform}' from a Windows host needs: " +
+                    $"'{toolchain.CrossCoreLibRef}' is absent.\n" +
+                    "Rebuild the toolchain with dn2cpp's 'dist/package-toolchain.sh' on this host — it " +
+                    "stages that framework from a linux-x64 runtime pack, and says how to fetch one if " +
+                    "none is installed.");
+            }
+
             return new Dn2CppExporter(toolchain, cmakeExe!, godotPlatform, androidNdkRoot, emcmakeExe);
         }
 
@@ -412,7 +432,12 @@ namespace GodotTools.Export
                 "--dotnet-module",
                 // Ordered before any publish-directory reference so the pinned
                 // framework closure wins the --auto-ref search described above.
-                "-r", _toolchain.CoreLibRef,
+                // Which framework is a function of the EXPORT TARGET, not of the
+                // host: a cross-compiled target needs the POSIX flavour, because the
+                // CoreLib's IL is what decides the native libraries the emitted
+                // P/Invokes name (Dn2CppToolchain.CoreLibRefFor). Create() has
+                // already refused the export if the one this needs is not staged.
+                "-r", _toolchain.CoreLibRefFor(_godotPlatform),
                 // The editor's own GodotSharp makes the emitted engine calls agree
                 // with the engine and the export templates by construction.
                 "-r", Dn2CppToolchain.EditorGodotSharpAssembly,
