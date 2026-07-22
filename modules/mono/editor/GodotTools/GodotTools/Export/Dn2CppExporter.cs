@@ -249,7 +249,16 @@ namespace GodotTools.Export
             // export it was perfectly able to serve: those two cross-compile through
             // Emscripten and the NDK, which bring their own compilers, and neither
             // needs the host one to be spelled clang++.
-            if (HostCxxCompiler() is null)
+            //
+            // Nor does either need a host compiler to EXIST. Emscripten and the NDK
+            // each hand cmake a toolchain file naming their own, so no host compiler
+            // is invoked anywhere in those two builds — and on Windows, demanding one
+            // regardless is not a harmless extra check: MSVC is reachable only from a
+            // shell that has run vcvarsall, so the demand refuses a Web export on a
+            // box carrying a complete emsdk and points its user at a Visual Studio
+            // install the export would never touch.
+            bool needsHostCxx = godotPlatform != OS.Platforms.Web && godotPlatform != OS.Platforms.Android;
+            if (needsHostCxx && HostCxxCompiler() is null)
                 missingTools.Add(OS.IsWindows ? "cl.exe or clang++" : "clang++ (Xcode Command Line Tools)");
 
             if (missingTools.Count > 0)
