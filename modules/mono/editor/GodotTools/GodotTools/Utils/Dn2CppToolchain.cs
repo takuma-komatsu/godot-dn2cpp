@@ -78,16 +78,24 @@ namespace GodotTools.Utils
 
         /// <summary>
         /// Whether an export to <paramref name="godotPlatform"/> needs the
-        /// POSIX-flavour framework rather than the bundle's host one.
-        /// <para>Android and Web are cross-compiled, and what the transpiler consumes
-        /// is the CoreLib's IL — so the flavour decides which native libraries the
-        /// emitted P/Invokes name. A Windows framework names kernel32/ntdll (the real,
-        /// unintercepted <c>FileStream</c>) and ole32 (COM, behind <c>Guid.NewGuid</c>);
-        /// neither the NDK sysroot nor Emscripten has any of them, and the failure
-        /// lands in the linker naming a library rather than a flavour. On a POSIX host
-        /// the question does not arise: that framework's <c>Interop.Sys</c> is what
-        /// bionic and Emscripten already answer, which is why this went unnoticed
-        /// while the lane was macOS-only.</para>
+        /// POSIX-flavour framework rather than the bundle's host one. The invariant:
+        /// <b>on a Windows host, every target but Windows itself needs the POSIX
+        /// flavour</b> — so it is written as the complement of the one host-native
+        /// target, never as a list of cross-targets. A list is a thing a newly
+        /// supported platform can be forgotten from; iOS and macOS were already
+        /// missing from one, and that was harmless only because
+        /// <c>VerifyAppleSdk</c> happens to refuse an Apple target on a Windows host
+        /// first — safety by accident of ordering, which the complement does not
+        /// depend on.
+        /// <para>What the transpiler consumes is the CoreLib's IL, so the flavour
+        /// decides which native libraries the emitted P/Invokes name. A Windows
+        /// framework names kernel32/ntdll (the real, unintercepted
+        /// <c>FileStream</c>) and ole32 (COM, behind <c>Guid.NewGuid</c>); no
+        /// cross-target sysroot — the NDK's, Emscripten's, an Apple SDK's — has any
+        /// of them, and the failure lands in the linker naming a library rather than
+        /// a flavour. On a POSIX host the question does not arise: that framework's
+        /// <c>Interop.Sys</c> is what bionic and Emscripten already answer, which is
+        /// why this went unnoticed while the lane was macOS-only.</para>
         /// <para>The publish RID stays the HOST's either way — that is a deliberate
         /// rule (a browser-wasm publish would need the wasm-tools workload and a
         /// Mono-flavoured CoreLib, i.e. it would change the very IL we transpile).
@@ -95,8 +103,7 @@ namespace GodotTools.Utils
         /// part the RID was never choosing well.</para>
         /// </summary>
         public static bool NeedsCrossCoreLib(string godotPlatform) =>
-            OS.IsWindows
-            && (godotPlatform == OS.Platforms.Android || godotPlatform == OS.Platforms.Web);
+            OS.IsWindows && godotPlatform != OS.Platforms.Windows;
 
         /// <summary>CMake source dir for the runtime the generated C++ links against.</summary>
         public string RuntimeDir => Path.Combine(RootDir, "runtime");
