@@ -147,10 +147,34 @@ namespace GodotTools.Export
         /// </param>
         public static Dn2CppExporter Create(string godotPlatform, IReadOnlyCollection<string> archs)
         {
-            if (godotPlatform == OS.Platforms.MacOS)
+            if (godotPlatform == OS.Platforms.MacOS || godotPlatform == OS.Platforms.Windows)
             {
-                // The bundle compiles the game with the host's clang++, so the export
-                // machine's architecture is the only one it can target.
+                // The two host-compiled desktop targets. The bundle compiles the
+                // game with the host's own C++ compiler (clang++ on macOS, cl.exe
+                // under the Ninja generator on Windows), so the export machine is
+                // the only machine it can target — neither its operating system nor
+                // its architecture may differ, and the checks are identical.
+                //
+                // The OS is asked FIRST, because the architecture test alone lets a
+                // foreign host straight through: a Linux x86_64 or an Intel macOS
+                // host exporting Windows/x86_64 matches on the architecture name and
+                // fails on nothing else, so the export runs the whole publish, the
+                // transpile and the native compile — minutes — produces a
+                // lib<target>.so or .dylib, and dies on a bare "produced no
+                // '<assembly>.dll'" that names no cause. Asking the OS first also
+                // makes the message the right one: a wrong-OS export is not a
+                // cross-architecture refusal.
+                if (godotPlatform == OS.Platforms.Windows ? !OS.IsWindows : !OS.IsMacOS)
+                {
+                    string targetName = godotPlatform == OS.Platforms.Windows ? "Windows" : "macOS";
+
+                    throw new NotSupportedException(
+                        "The dn2cpp export backend compiles the game with the host's own C++ compiler, so an " +
+                        $"export to {targetName} has to run on {targetName}; this host is not one. Export from a " +
+                        $"{targetName} machine, or switch 'dotnet/export_backend' to 'Host Runtime' or 'NativeAOT' " +
+                        "for this preset.");
+                }
+
                 string hostArch = GetHostArchitecture();
 
                 if (archs.Count == 0)
@@ -227,7 +251,7 @@ namespace GodotTools.Export
             else
             {
                 throw new NotSupportedException(
-                    $"The dn2cpp export backend supports macOS, iOS, Android and Web only for now, not " +
+                    $"The dn2cpp export backend supports Windows, macOS, iOS, Android and Web only for now, not " +
                     $"'{godotPlatform}'. Switch 'dotnet/export_backend' to 'Host Runtime' or 'NativeAOT' for this " +
                     "preset.");
             }
@@ -238,17 +262,57 @@ namespace GodotTools.Export
                 missingTools.Add($"cmake ({RequiredCMakeMajor}.{RequiredCMakeMinor} or newer)");
             if (OS.PathWhich("ninja") is null)
                 missingTools.Add("ninja");
-            if (OS.PathWhich("clang++") is null)
-                missingTools.Add("clang++ (Xcode Command Line Tools)");
+            // The C++ compiler this looks for is the HOST's, and which name that is
+            // belongs to the host rather than to the export target: the configure
+            // below spells no compiler at all, so cmake picks the platform default —
+            // cl.exe under the Ninja generator on Windows, clang++ on macOS. Naming
+            // one unconditionally is what made a Windows host refuse a Web or Android
+            // export it was perfectly able to serve: those two cross-compile through
+            // Emscripten and the NDK, which bring their own compilers, and neither
+            // needs the host one to be spelled clang++.
+            //
+            // Nor does either need a host compiler to EXIST. Emscripten and the NDK
+            // each hand cmake a toolchain file naming their own, so no host compiler
+            // is invoked anywhere in those two builds — and on Windows, demanding one
+            // regardless is not a harmless extra check: MSVC is reachable only from a
+            // shell that has run vcvarsall, so the demand refuses a Web export on a
+            // box carrying a complete emsdk and points its user at a Visual Studio
+            // install the export would never touch.
+            bool needsHostCxx = godotPlatform != OS.Platforms.Web && godotPlatform != OS.Platforms.Android;
+            if (needsHostCxx && HostCxxCompiler() is null)
+            {
+                missingTools.Add(OS.IsWindows ? "cl.exe or clang++"
+                    : OS.IsMacOS ? "clang++ (Xcode Command Line Tools)"
+                    : "clang++ or g++");
+            }
 
             if (missingTools.Count > 0)
             {
+                // Three arms, not two, and the third is not hypothetical: a host that
+                // is neither Windows nor macOS reaches this backend for the two
+                // cross-compiled targets (Web, Android), which need cmake and ninja
+                // like every other target does. Told to run 'xcode-select --install'
+                // and 'brew install', a Linux user is being sent to a package manager
+                // their machine does not have.
+                string remedy = OS.IsWindows
+                    // The Windows counterpart of the Finder-PATH trap below, and a
+                    // sharper one: MSVC is not installed onto PATH at all. cl.exe
+                    // becomes visible only inside a shell that has run vcvarsall,
+                    // so an editor started from Explorer — or from an ordinary
+                    // terminal — cannot see a complete Visual Studio install.
+                    ? "Install the Visual Studio C++ workload plus cmake and ninja, then start the editor " +
+                      "from a Developer Command Prompt (or any shell that has run vcvarsall): cl.exe is not " +
+                      "on PATH otherwise, however complete the install is."
+                    : OS.IsMacOS
+                        ? "Install it with 'xcode-select --install' and 'brew install cmake ninja', then restart " +
+                          "the editor. An editor launched from Finder inherits a minimal PATH, so Homebrew tools " +
+                          "can be invisible to it even when a terminal finds them."
+                        : "Install it with your distribution's package manager (e.g. 'apt install clang cmake " +
+                          "ninja-build'), then restart the editor from a shell that has the tools on PATH.";
+
                 throw new NotSupportedException(
                     "The dn2cpp export backend needs a C++ toolchain that is not on PATH: " +
-                    $"{string.Join(", ", missingTools)}.\n" +
-                    "Install it with 'xcode-select --install' and 'brew install cmake ninja', then restart the " +
-                    "editor. An editor launched from Finder inherits a minimal PATH, so Homebrew tools can be " +
-                    "invisible to it even when a terminal finds them.");
+                    $"{string.Join(", ", missingTools)}.\n" + remedy);
             }
 
             Version cmakeVersion = VerifyCMakeVersion(cmakeExe!);
@@ -272,6 +336,26 @@ namespace GodotTools.Export
 
             if (!Dn2CppToolchain.TryResolve(out Dn2CppToolchain? toolchain, out string toolchainError))
                 throw new NotSupportedException(toolchainError);
+
+            // A cross-target export off a Windows host transpiles the POSIX-flavour
+            // framework, not the bundle's host one (Dn2CppToolchain.NeedsCrossCoreLib
+            // says why). Checked here rather than at the -r, because the alternative
+            // is not a missing file: the transpile SUCCEEDS against the Windows
+            // framework and the failure surfaces as a linker complaining about
+            // -lkernel32, or as an ole32 import no Emscripten link can satisfy —
+            // neither of which names a CoreLib flavour, an export backend, or this
+            // sentence.
+            if (Dn2CppToolchain.NeedsCrossCoreLib(godotPlatform)
+                && !File.Exists(toolchain.CrossCoreLibRef))
+            {
+                throw new NotSupportedException(
+                    $"The dn2cpp toolchain at '{toolchain.RootDir}' ({toolchain.Source}) carries no " +
+                    $"POSIX framework, which an export to '{godotPlatform}' from a Windows host needs: " +
+                    $"'{toolchain.CrossCoreLibRef}' is absent.\n" +
+                    "Rebuild the toolchain with dn2cpp's 'dist/package-toolchain.sh' on this host — it " +
+                    "stages that framework from a linux-x64 runtime pack, and says how to fetch one if " +
+                    "none is installed.");
+            }
 
             return new Dn2CppExporter(toolchain, cmakeExe!, godotPlatform, androidNdkRoot, emcmakeExe);
         }
@@ -313,6 +397,11 @@ namespace GodotTools.Export
             // the RID's. So it is read off the platform Create was given, which is
             // the only place that still knows.
             bool targetsWeb = _godotPlatform == OS.Platforms.Web;
+            // Windows, like macOS, is host-compiled and falls into the host-arch
+            // check below; it is named here only for the CMake output-naming rule,
+            // which is Windows's own: a SHARED target is <name>.dll with NO 'lib'
+            // prefix, and the engine opens exactly <assembly>.dll.
+            bool targetsWindows = _godotPlatform == OS.Platforms.Windows;
             if (targetsWeb)
             {
                 if (arch != WebArch)
@@ -378,7 +467,12 @@ namespace GodotTools.Export
                 "--dotnet-module",
                 // Ordered before any publish-directory reference so the pinned
                 // framework closure wins the --auto-ref search described above.
-                "-r", _toolchain.CoreLibRef,
+                // Which framework is a function of the EXPORT TARGET, not of the
+                // host: a cross-compiled target needs the POSIX flavour, because the
+                // CoreLib's IL is what decides the native libraries the emitted
+                // P/Invokes name (Dn2CppToolchain.CoreLibRefFor). Create() has
+                // already refused the export if the one this needs is not staged.
+                "-r", _toolchain.CoreLibRefFor(_godotPlatform),
                 // The editor's own GodotSharp makes the emitted engine calls agree
                 // with the engine and the export templates by construction.
                 "-r", Dn2CppToolchain.EditorGodotSharpAssembly,
@@ -471,7 +565,7 @@ namespace GodotTools.Export
                 "-B", buildDir,
                 "-G", "Ninja",
                 "-DDN2CPP_DOTNET_MODULE=ON",
-                $"-DDN2CPP_APP_DIR={genDir}",
+                $"-DDN2CPP_APP_DIR={CMakePath(genDir)}",
                 $"-DDN2CPP_APP_NAME={targetName}",
             };
             if (targetsIOS)
@@ -492,7 +586,8 @@ namespace GodotTools.Export
                 // The NDK ships its own toolchain file — it selects the bionic
                 // sysroot, the target triple and the API-level defines together,
                 // which is why nothing here spells a compiler.
-                configureArgs.Add($"-DCMAKE_TOOLCHAIN_FILE={_androidNdkRoot}/build/cmake/android.toolchain.cmake");
+                configureArgs.Add("-DCMAKE_TOOLCHAIN_FILE=" +
+                    CMakePath(Path.Combine(_androidNdkRoot!, "build", "cmake", "android.toolchain.cmake")));
                 configureArgs.Add($"-DANDROID_ABI={AndroidAbi}");
                 configureArgs.Add($"-DANDROID_PLATFORM={AndroidPlatform}");
             }
@@ -531,11 +626,13 @@ namespace GodotTools.Export
 
             RunTool(_cmakeExe, new List<string> { "--build", buildDir }, "compiling the drop-in library");
 
-            // CMake names a SHARED target's output lib<name>.<ext>. On Apple the
-            // engine opens <name>.dylib — the name a NativeAOT publish produces —
-            // so the lib prefix is dropped when staging. On Android it opens the
-            // bare soname lib<name>.so and lets the linker find it in the APK's
-            // lib/<abi>/, so there the prefix is the whole point: keep it.
+            // What CMake names a SHARED target's output is the platform's rule, not
+            // one convention, and the three Unix-family targets already needed three
+            // different answers. On Apple the linker writes lib<name>.dylib and the
+            // engine opens <name>.dylib — the name a NativeAOT publish produces — so
+            // the lib prefix is dropped when staging. On Android it opens the bare
+            // soname lib<name>.so and lets the linker find it in the APK's lib/<abi>/,
+            // so there the prefix is the whole point: keep it.
             //
             // On the Web the prefix goes, for a third reason. Emscripten names the
             // side module lib<name>.so like any other SHARED target, but the engine
@@ -547,16 +644,44 @@ namespace GodotTools.Export
             // exporter copied next to index.html. That is the staged file's name. So
             // the staged file must be exactly <assembly>.so: on this platform the
             // name is not a convention, it is the entire lookup.
-            string libExt = targetsAndroid || targetsWeb ? "so" : "dylib";
-            string builtLibrary = Path.Combine(buildDir, $"lib{targetName}.{libExt}");
-            if (!File.Exists(builtLibrary))
+            //
+            // Windows is the fourth, and the only one whose BUILT name is not decided
+            // by the platform alone: the no-'lib'-prefix rule is the MSVC ABI's, not
+            // Windows's. cmake sets CMAKE_SHARED_LIBRARY_PREFIX from the toolchain,
+            // so cl.exe and clang-cl write <name>.dll while an MSYS2/MinGW clang++ —
+            // which HostCxxCompiler explicitly falls back to — writes lib<name>.dll.
+            // Assuming one of the two makes the other fail as the same causeless
+            // "produced no <name>.dll", so both are probed. Accepting either is safe
+            // because nothing downstream reads the built name: what the engine opens
+            // is the STAGED file, which is <assembly>.dll (no prefix, the engine's
+            // WINDOWS_ENABLED branch) whichever candidate was found.
+            string builtLibrary;
+            if (targetsWindows)
             {
-                throw new InvalidOperationException(
-                    $"The dn2cpp native build produced no '{builtLibrary}'.\nLog: {_logPath}");
+                string msvcNamed = Path.Combine(buildDir, $"{targetName}.dll");
+                string mingwNamed = Path.Combine(buildDir, $"lib{targetName}.dll");
+                builtLibrary = File.Exists(msvcNamed) ? msvcNamed : mingwNamed;
+                if (!File.Exists(builtLibrary))
+                {
+                    throw new InvalidOperationException(
+                        $"The dn2cpp native build produced neither '{msvcNamed}' nor '{mingwNamed}'.\n" +
+                        $"Log: {_logPath}");
+                }
+            }
+            else
+            {
+                builtLibrary = Path.Combine(buildDir,
+                    $"lib{targetName}.{(targetsAndroid || targetsWeb ? "so" : "dylib")}");
+                if (!File.Exists(builtLibrary))
+                {
+                    throw new InvalidOperationException(
+                        $"The dn2cpp native build produced no '{builtLibrary}'.\nLog: {_logPath}");
+                }
             }
 
             RecreateDirectory(stageDir);
-            string stagedName = targetsAndroid ? $"lib{assemblyName}.so"
+            string stagedName = targetsWindows ? $"{assemblyName}.dll"
+                : targetsAndroid ? $"lib{assemblyName}.so"
                 : targetsWeb ? $"{assemblyName}.so"
                 : $"{assemblyName}.dylib";
             string stagedLibrary = Path.Combine(stageDir, stagedName);
@@ -629,6 +754,16 @@ namespace GodotTools.Export
         {
             var dependencies = new List<string>();
 
+            // The set excluded here must be the set REFERENCED above, and which one
+            // that is depends on the target: a cross-target export off a Windows host
+            // passes the ref-posix/ closure (Dn2CppToolchain.CoreLibRefFor). Probing a
+            // hard-coded ref/ agrees with it only for as long as the two directories
+            // hold the same assembly names — an invariant nothing enforces and no
+            // failure would announce, since the symptom is a framework assembly passed
+            // twice under two flavours. So the directory is derived from the reference
+            // itself.
+            string frameworkRefDir = Path.GetDirectoryName(_toolchain.CoreLibRefFor(_godotPlatform))!;
+
             foreach (string candidate in Directory.GetFiles(publishOutputDir, "*.dll", SearchOption.TopDirectoryOnly))
             {
                 string name = Path.GetFileName(candidate);
@@ -637,8 +772,31 @@ namespace GodotTools.Export
                     continue;
                 if (name.StartsWith("GodotSharp", StringComparison.Ordinal) || name == "GodotPlugins.dll")
                     continue;
-                if (File.Exists(Path.Combine(_toolchain.RootDir, "ref", name)))
+                if (File.Exists(Path.Combine(frameworkRefDir, name)))
                     continue;
+                // A framework-dependent Windows publish drops NATIVE runtime DLLs
+                // into the output that a macOS/Linux publish leaves in the shared
+                // framework — hostfxr.dll always, and the diagnostics pair
+                // (mscordaccore_*.dll, mscordbi.dll) with debug symbols. They are
+                // not managed assemblies, they are not in the bundle's ref/ closure,
+                // and passing one to the transpiler's -r makes it throw "PE image
+                // does not have metadata" and abort the whole export. The .dll glob
+                // cannot tell them from managed ones by name, so the test is on the
+                // file: skip anything without a CLI metadata header. macOS output is
+                // unchanged — its publish dir holds only managed assemblies, which
+                // all pass.
+                //
+                // The skip is LOGGED, never silent. A truncated or otherwise corrupt
+                // *managed* assembly reads as native by the same test, and dropping
+                // it without a word resurfaces minutes later as a transpiler error
+                // about a type that cannot be resolved — a diagnostic pointing at the
+                // wrong file entirely. The log line is the only place the two cases
+                // are distinguishable.
+                if (!IsManagedAssembly(candidate))
+                {
+                    LogLine($"skipping '{name}': not a managed assembly (no CLI metadata header)");
+                    continue;
+                }
 
                 dependencies.Add(candidate);
             }
@@ -646,6 +804,66 @@ namespace GodotTools.Export
             dependencies.Sort(StringComparer.Ordinal);
             return dependencies;
         }
+
+        /// <summary>
+        /// True when <paramref name="path"/> is a managed assembly (has a CLI
+        /// metadata header). <c>AssemblyName.GetAssemblyName</c> reads the identity
+        /// out of the metadata and throws <see cref="BadImageFormatException"/> for a
+        /// native image — the BCL-standard managed/native discriminator. It opens,
+        /// reads and closes; it does not load the assembly into the process.
+        /// <para>The catches are deliberate and exhaustive over what this call is
+        /// documented to throw: only the two that carry an ANSWER are turned into one,
+        /// and everything else is a failure to ask the question at all.</para>
+        /// </summary>
+        private static bool IsManagedAssembly(string path)
+        {
+            try
+            {
+                System.Reflection.AssemblyName.GetAssemblyName(path);
+                return true;
+            }
+            catch (BadImageFormatException)
+            {
+                return false;
+            }
+            catch (System.IO.FileLoadException)
+            {
+                // Readable but e.g. already loaded elsewhere — it IS managed, so
+                // keep it; a genuinely broken reference fails loudly in the transpiler.
+                return true;
+            }
+            catch (Exception e) when (e is System.Security.SecurityException
+                                          or ArgumentException
+                                          or System.IO.IOException)
+            {
+                // An unreadable, inaccessible or vanished file: the probe learned
+                // nothing, so neither answer is available. Left to escape, it reaches
+                // _ExportBegin's catch-all, which shows the raw Message — "Security
+                // error." or "Access to the path is denied." — naming neither the file
+                // nor the export step, because that handler prints Message and nothing
+                // else. NotSupportedException is the file's contract for a refusal the
+                // user can act on (bad input, not a broken invariant — those are the
+                // InvalidOperationExceptions above), so the diagnostic is built here
+                // where the file name is still in hand.
+                throw new NotSupportedException(
+                    $"The dn2cpp export backend could not read '{path}' from the publish output to decide whether " +
+                    $"it is a managed assembly: {e.Message}\n" +
+                    "Delete the publish output and export again; if it persists, check the file's permissions.", e);
+            }
+        }
+
+        /// <summary>
+        /// A path in the one spelling CMake uses for paths everywhere: forward
+        /// slashes. Applied to the path-valued <c>-D</c> arguments, which are built
+        /// here rather than taken verbatim — a Windows path concatenated with a
+        /// literal tail yields the mixed <c>C:\…\ndk\27.0/build/cmake/…</c>, which
+        /// cmake accepts but then carries into its cache, its logs and its error
+        /// messages, where the two conventions in one path read as a defect. The
+        /// project-declared link settings are deliberately NOT run through this: they
+        /// are pass-through user text, not paths this method built, and a backslash
+        /// in a link flag may be an escape rather than a separator.
+        /// </summary>
+        private static string CMakePath(string path) => path.Replace('\\', '/');
 
         /// <summary>The project's <c>.godot/mono</c> directory, where the persistent build tree lives.</summary>
         private static string MonoDataDir =>
@@ -666,6 +884,28 @@ namespace GodotTools.Export
                 var other => throw new NotSupportedException(
                     $"The dn2cpp export backend does not support the host architecture '{other}'."),
             };
+        }
+
+        /// <summary>
+        /// The host C++ compiler cmake will pick for a native build, or
+        /// <see langword="null"/> when there is none on PATH. The order matches
+        /// cmake's own default search under the Ninja generator, so what this
+        /// finds is what the configure will use — asking for a compiler cmake
+        /// would not have chosen turns a working host into a refusal, and missing
+        /// one cmake WOULD have chosen turns an actionable refusal into a configure
+        /// error many minutes into the export.
+        /// </summary>
+        private static string? HostCxxCompiler()
+        {
+            if (OS.IsWindows)
+                return OS.PathWhich("cl") ?? OS.PathWhich("clang++");
+
+            // clang++ first because it is cmake's own first choice and the only
+            // compiler a macOS host has; g++ after it because on Linux it is the
+            // usual one, and a host carrying g++ alone is a host cmake would have
+            // configured happily — refusing it would turn a working machine into a
+            // refusal, which is exactly the failure this probe exists to avoid.
+            return OS.PathWhich("clang++") ?? OS.PathWhich("g++");
         }
 
         /// <summary>
