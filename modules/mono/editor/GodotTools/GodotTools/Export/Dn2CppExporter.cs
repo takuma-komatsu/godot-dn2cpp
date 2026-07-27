@@ -551,6 +551,11 @@ namespace GodotTools.Export
             // assertions that every dn2cpp gate runs with.
             GD.Print($"dn2cpp: compiling the drop-in library ({slot})...");
             Directory.CreateDirectory(buildDir);
+            // ...but the slot names the export TARGET, and the source tree the
+            // persistent cache was configured from is not part of it. So the cache
+            // has to be asked whether it still describes this toolchain before the
+            // configure trusts it.
+            ResetStaleBuildCache(buildDir, _toolchain.RuntimeDir, slot);
             // A CMake target name is not a free-form string — it may hold only
             // [A-Za-z0-9_.+-], and a game's assembly name may hold anything a file
             // name may ("Squash the Creeps (3D)"). Passing one straight through
@@ -1214,6 +1219,84 @@ namespace GodotTools.Export
             if (Directory.Exists(path))
                 Directory.Delete(path, recursive: true);
             Directory.CreateDirectory(path);
+        }
+
+        /// <summary>
+        /// Discard a persistent build directory whose CMake cache was configured
+        /// from a different source tree than the toolchain now offers.
+        /// </summary>
+        /// <remarks>
+        /// <para>A CMake cache records the source directory it was configured from,
+        /// and cmake refuses outright when a later configure names another one — the
+        /// error talks about the binary directory and CMakeCache.txt, names neither
+        /// dn2cpp nor the export, and its remedy (delete exactly one directory) is
+        /// not in it. Since the build directory is deliberately kept across exports,
+        /// every way the toolchain's path can move is a way to reach that error:
+        /// re-pointing <c>dotnet/export/dn2cpp_toolchain_path</c>, an editor whose
+        /// <c>GodotSharp/Dn2Cpp</c> landed somewhere else than last time, a project
+        /// directory copied off another machine.</para>
+        /// <para>The test is the cache's OWN declaration rather than the toolchain's
+        /// identity folded into the slot, and that is a deliberate choice in both
+        /// directions. The slot exists so the runtime and the vendored third-party
+        /// sources compile once per export target; keying it on anything that tracks
+        /// the toolchain's CONTENT — the bundle manifest's <c>content_hash</c>, say —
+        /// would throw that away every time dn2cpp is rebuilt, which is the whole
+        /// reason the directory persists. Keying it on the toolchain's PATH would
+        /// work, but it answers a narrower question: the cache's declaration also
+        /// catches a build tree that was moved rather than a toolchain, and it is
+        /// what cmake itself is going to compare against, so there is no second
+        /// notion of "same tree" to keep in agreement.</para>
+        /// </remarks>
+        private static void ResetStaleBuildCache(string buildDir, string runtimeDir, string slot)
+        {
+            const string HomeDirectoryKey = "CMAKE_HOME_DIRECTORY:INTERNAL=";
+
+            string cacheFile = Path.Combine(buildDir, "CMakeCache.txt");
+            if (!File.Exists(cacheFile))
+                return;
+
+            string? cachedHome = null;
+            foreach (string line in File.ReadLines(cacheFile))
+            {
+                if (line.StartsWith(HomeDirectoryKey, StringComparison.Ordinal))
+                {
+                    cachedHome = line.Substring(HomeDirectoryKey.Length).Trim();
+                    break;
+                }
+            }
+
+            // A cache with no such entry is one cmake never finished writing (an
+            // interrupted or failed first configure). It is not "current", and the
+            // configure that follows would fail on it, so it goes too.
+            if (cachedHome is not null && SameDirectory(cachedHome, runtimeDir))
+                return;
+
+            GD.Print($"dn2cpp: stale build cache reset ({slot}): its CMakeCache.txt was configured " +
+                $"from '{cachedHome ?? "<no CMAKE_HOME_DIRECTORY>"}', but this toolchain's runtime " +
+                $"sources are at '{runtimeDir}' — recreating {buildDir}");
+            RecreateDirectory(buildDir);
+        }
+
+        /// <summary>
+        /// Whether two directory paths name one directory, as far as a CMake cache
+        /// value and a path this process built can be compared.
+        /// </summary>
+        /// <remarks>
+        /// Three normalizations, and on Windows all three are load-bearing at once:
+        /// cmake writes cache paths with forward slashes on every platform while
+        /// <see cref="Dn2CppToolchain.RuntimeDir"/> arrives with the platform's own
+        /// separator (the same fold <see cref="CMakePath"/> applies going the other
+        /// way), a trailing separator is not a difference, and NTFS is
+        /// case-insensitive — so a comparison that is exact on any of the three
+        /// reports a stale cache on every export and recompiles the runtime each
+        /// time, which is the opposite failure and a silent one.
+        /// </remarks>
+        private static bool SameDirectory(string a, string b)
+        {
+            static string Normalize(string path) => CMakePath(path).TrimEnd('/');
+
+            return string.Equals(Normalize(a), Normalize(b),
+                OS.IsWindows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
         }
 
         public void Dispose()
