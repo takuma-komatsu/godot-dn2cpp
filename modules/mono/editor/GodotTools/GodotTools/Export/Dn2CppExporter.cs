@@ -545,17 +545,17 @@ namespace GodotTools.Export
             // vendored third-party sources are compiled once; only the regenerated
             // C++ is rebuilt on a re-export.
             //
+            // ...but the slot names the export TARGET, and the source tree the
+            // persistent cache was configured from is not part of it. So the cache
+            // has to be asked whether it still describes this toolchain before the
+            // configure trusts it.
+            ResetStaleBuildCache(buildDir, _toolchain.RuntimeDir, slot);
             // No CMAKE_BUILD_TYPE: runtime/CMakeLists.txt pins its own -O2 per
             // target, so a build type would only add -g (Debug) or -DNDEBUG
             // (Release) on top, and NDEBUG would silently disable the runtime's
             // assertions that every dn2cpp gate runs with.
             GD.Print($"dn2cpp: compiling the drop-in library ({slot})...");
             Directory.CreateDirectory(buildDir);
-            // ...but the slot names the export TARGET, and the source tree the
-            // persistent cache was configured from is not part of it. So the cache
-            // has to be asked whether it still describes this toolchain before the
-            // configure trusts it.
-            ResetStaleBuildCache(buildDir, _toolchain.RuntimeDir, slot);
             // A CMake target name is not a free-form string — it may hold only
             // [A-Za-z0-9_.+-], and a game's assembly name may hold anything a file
             // name may ("Squash the Creeps (3D)"). Passing one straight through
