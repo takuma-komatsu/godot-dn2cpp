@@ -112,6 +112,22 @@ namespace GodotTools.Export
         private readonly StreamWriter _log;
         private readonly Queue<string> _logTail = new Queue<string>();
 
+        /// <summary>
+        /// The build configs this export has already transpiled — one transpile
+        /// each, its output shared by every runtime-identifier slot of that config.
+        /// The build config alone is the key because an exporter serves one Godot
+        /// platform.
+        /// </summary>
+        /// <remarks>
+        /// The transpiler's inputs — the game IL, the bundle's pinned framework
+        /// closure, the platform's flags — are a function of the export TARGET and
+        /// never of the runtime identifier: what a RID decides is the native
+        /// compile, which still runs per slot. So a second transpile would emit a
+        /// byte-identical tree at a per-slot path, and on iOS's three slots that is
+        /// two thirds of the one step whose cost scales with the game.
+        /// </remarks>
+        private readonly HashSet<string> _transpiled = new HashSet<string>();
+
         private Dn2CppExporter(Dn2CppToolchain toolchain, string cmakeExe, string godotPlatform,
             string? androidNdkRoot, string? emcmakeExe)
         {
@@ -444,10 +460,124 @@ namespace GodotTools.Export
             // and an Emscripten one. cmake either refuses the changed compiler outright
             // or, worse, reuses the cached one and builds the wrong thing.
             string slot = $"{_godotPlatform}-{buildConfig}-{runtimeIdentifier}";
-            string ilDir = Path.Combine(workDir, "il", slot);
-            string genDir = Path.Combine(workDir, "gen", slot);
+            // The transpile's own slot, one level coarser: see _transpiled.
+            string ilSlot = $"{_godotPlatform}-{buildConfig}";
+            string ilDir = Path.Combine(workDir, "il", ilSlot);
+            string genDir = Path.Combine(workDir, "gen", ilSlot);
             string buildDir = Path.Combine(workDir, "build", slot);
             string stageDir = Path.Combine(workDir, "stage", slot);
+
+            if (_transpiled.Add(buildConfig))
+            {
+                Transpile(publishOutputDir, assemblyName, ilDir, genDir);
+            }
+            else
+            {
+                GD.Print($"dn2cpp: reusing the C++ transpiled for {buildConfig} ({genDir})");
+                LogLine($"reusing the C++ transpiled for {buildConfig}: {genDir}");
+            }
+
+            // The build directory persists across exports so the runtime and the
+            // vendored third-party sources are compiled once; only the regenerated
+            // C++ is rebuilt on a re-export.
+            //
+            // ...but the slot names the export TARGET, and the source tree the
+            // persistent cache was configured from is not part of it. So the cache
+            // has to be asked whether it still describes this toolchain before the
+            // configure trusts it.
+            ResetStaleBuildCache(buildDir, _toolchain.RuntimeDir, slot);
+            // No CMAKE_BUILD_TYPE: runtime/CMakeLists.txt pins its own -O2 per
+            // target, so a build type would only add -g (Debug) or -DNDEBUG
+            // (Release) on top, and NDEBUG would silently disable the runtime's
+            // assertions that every dn2cpp gate runs with.
+            GD.Print($"dn2cpp: compiling the drop-in library ({slot})...");
+            Directory.CreateDirectory(buildDir);
+            // A CMake target name is not a free-form string — it may hold only
+            // [A-Za-z0-9_.+-], and a game's assembly name may hold anything a file
+            // name may ("Squash the Creeps (3D)"). Passing one straight through
+            // fails the configure outright ("reserved or not valid"), so the target
+            // is built under a sanitized name and staged under the real one below:
+            // what the engine dlopens is the name of the STAGED file, and nothing
+            // downstream ever sees the target's.
+            string targetName = SanitizeCMakeTarget(assemblyName);
+            var configureArgs = new List<string>
+            {
+                "-S", _toolchain.RuntimeDir,
+                "-B", buildDir,
+                "-G", "Ninja",
+                "-DDN2CPP_DOTNET_MODULE=ON",
+                $"-DDN2CPP_APP_DIR={CMakePath(genDir)}",
+                $"-DDN2CPP_APP_NAME={targetName}",
+            };
+            if (targetsIOS)
+            {
+                // Retarget the host clang at the device or simulator SDK. The arch
+                // parameter carries Godot's architecture names (arm64, x86_64),
+                // which are exactly clang's -arch spellings.
+                string sysroot = runtimeIdentifier.StartsWith("iossimulator-", StringComparison.Ordinal)
+                    ? "iphonesimulator"
+                    : "iphoneos";
+                configureArgs.Add("-DCMAKE_SYSTEM_NAME=iOS");
+                configureArgs.Add($"-DCMAKE_OSX_SYSROOT={sysroot}");
+                configureArgs.Add($"-DCMAKE_OSX_ARCHITECTURES={arch}");
+                configureArgs.Add($"-DCMAKE_OSX_DEPLOYMENT_TARGET={IOSDeploymentTarget}");
+            }
+            else if (targetsAndroid)
+            {
+                // The NDK ships its own toolchain file — it selects the bionic
+                // sysroot, the target triple and the API-level defines together,
+                // which is why nothing here spells a compiler.
+                configureArgs.Add("-DCMAKE_TOOLCHAIN_FILE=" +
+                    CMakePath(Path.Combine(_androidNdkRoot!, "build", "cmake", "android.toolchain.cmake")));
+                configureArgs.Add($"-DANDROID_ABI={AndroidAbi}");
+                configureArgs.Add($"-DANDROID_PLATFORM={AndroidPlatform}");
+            }
+
+            // Project-declared extra native link inputs (PackedStringArray
+            // settings, like the transpile knob above; res:// and user:// entries
+            // are globalized). Both defines are passed on EVERY configure, empty
+            // when unset: the build directory persists across exports and cmake
+            // never resets a cached variable, so an emptied setting must
+            // overwrite the cache rather than leave the previous export's flags
+            // armed.
+            string extraLinkFlags = string.Join(' ', GetPathListSetting(ExtraLinkFlagsSetting));
+            string extraLinkLibs = string.Join(' ', GetPathListSetting(ExtraLinkLibsSetting));
+            if (extraLinkFlags.Length > 0)
+                GD.Print($"dn2cpp: extra link flags (project setting): {extraLinkFlags}");
+            if (extraLinkLibs.Length > 0)
+                GD.Print($"dn2cpp: extra link libs (project setting): {extraLinkLibs}");
+            configureArgs.Add($"-DDN2CPP_APP_LINK_FLAGS={extraLinkFlags}");
+            configureArgs.Add($"-DDN2CPP_APP_LINK_LIBS={extraLinkLibs}");
+
+            if (targetsWeb)
+            {
+                // emcmake runs cmake with Emscripten's own CMake toolchain file
+                // injected, which is what selects em++, the wasm target and the
+                // side-module link together — the same reason the Android arm above
+                // spells no compiler either. Only the configure is wrapped: the
+                // cache it writes carries the toolchain into every later build.
+                var emcmakeArgs = new List<string> { _cmakeExe };
+                emcmakeArgs.AddRange(configureArgs);
+                RunTool(_emcmakeExe!, emcmakeArgs, "configuring the native build");
+            }
+            else
+            {
+                RunTool(_cmakeExe, configureArgs, "configuring the native build");
+            }
+
+            RunTool(_cmakeExe, new List<string> { "--build", buildDir }, "compiling the drop-in library");
+
+            return StageBuiltLibrary(buildDir, stageDir, targetName, assemblyName,
+                targetsWindows, targetsAndroid, targetsWeb);
+        }
+
+        /// <summary>
+        /// Transpiles the published game assembly into <paramref name="genDir"/>.
+        /// Runs once per build config — see <see cref="_transpiled"/>.
+        /// </summary>
+        private void Transpile(string publishOutputDir, string assemblyName, string ilDir, string genDir)
+        {
+            bool targetsWeb = _godotPlatform == OS.Platforms.Web;
 
             // The transpiler's --auto-ref resolves the game's framework references
             // from the directory of the first passed assembly that holds a
@@ -540,97 +670,15 @@ namespace GodotTools.Export
             transpileArgs.Add("-o");
             transpileArgs.Add(genDir);
             RunTool(_toolchain.Dn2CppExe, transpileArgs, "transpiling the game assembly");
+        }
 
-            // The build directory persists across exports so the runtime and the
-            // vendored third-party sources are compiled once; only the regenerated
-            // C++ is rebuilt on a re-export.
-            //
-            // ...but the slot names the export TARGET, and the source tree the
-            // persistent cache was configured from is not part of it. So the cache
-            // has to be asked whether it still describes this toolchain before the
-            // configure trusts it.
-            ResetStaleBuildCache(buildDir, _toolchain.RuntimeDir, slot);
-            // No CMAKE_BUILD_TYPE: runtime/CMakeLists.txt pins its own -O2 per
-            // target, so a build type would only add -g (Debug) or -DNDEBUG
-            // (Release) on top, and NDEBUG would silently disable the runtime's
-            // assertions that every dn2cpp gate runs with.
-            GD.Print($"dn2cpp: compiling the drop-in library ({slot})...");
-            Directory.CreateDirectory(buildDir);
-            // A CMake target name is not a free-form string — it may hold only
-            // [A-Za-z0-9_.+-], and a game's assembly name may hold anything a file
-            // name may ("Squash the Creeps (3D)"). Passing one straight through
-            // fails the configure outright ("reserved or not valid"), so the target
-            // is built under a sanitized name and staged under the real one below:
-            // what the engine dlopens is the name of the STAGED file, and nothing
-            // downstream ever sees the target's.
-            string targetName = SanitizeCMakeTarget(assemblyName);
-            var configureArgs = new List<string>
-            {
-                "-S", _toolchain.RuntimeDir,
-                "-B", buildDir,
-                "-G", "Ninja",
-                "-DDN2CPP_DOTNET_MODULE=ON",
-                $"-DDN2CPP_APP_DIR={CMakePath(genDir)}",
-                $"-DDN2CPP_APP_NAME={targetName}",
-            };
-            if (targetsIOS)
-            {
-                // Retarget the host clang at the device or simulator SDK. The arch
-                // parameter carries Godot's architecture names (arm64, x86_64),
-                // which are exactly clang's -arch spellings.
-                string sysroot = runtimeIdentifier.StartsWith("iossimulator-", StringComparison.Ordinal)
-                    ? "iphonesimulator"
-                    : "iphoneos";
-                configureArgs.Add("-DCMAKE_SYSTEM_NAME=iOS");
-                configureArgs.Add($"-DCMAKE_OSX_SYSROOT={sysroot}");
-                configureArgs.Add($"-DCMAKE_OSX_ARCHITECTURES={arch}");
-                configureArgs.Add($"-DCMAKE_OSX_DEPLOYMENT_TARGET={IOSDeploymentTarget}");
-            }
-            else if (targetsAndroid)
-            {
-                // The NDK ships its own toolchain file — it selects the bionic
-                // sysroot, the target triple and the API-level defines together,
-                // which is why nothing here spells a compiler.
-                configureArgs.Add("-DCMAKE_TOOLCHAIN_FILE=" +
-                    CMakePath(Path.Combine(_androidNdkRoot!, "build", "cmake", "android.toolchain.cmake")));
-                configureArgs.Add($"-DANDROID_ABI={AndroidAbi}");
-                configureArgs.Add($"-DANDROID_PLATFORM={AndroidPlatform}");
-            }
-
-            // Project-declared extra native link inputs (PackedStringArray
-            // settings, like the transpile knob above; res:// and user:// entries
-            // are globalized). Both defines are passed on EVERY configure, empty
-            // when unset: the build directory persists across exports and cmake
-            // never resets a cached variable, so an emptied setting must
-            // overwrite the cache rather than leave the previous export's flags
-            // armed.
-            string extraLinkFlags = string.Join(' ', GetPathListSetting(ExtraLinkFlagsSetting));
-            string extraLinkLibs = string.Join(' ', GetPathListSetting(ExtraLinkLibsSetting));
-            if (extraLinkFlags.Length > 0)
-                GD.Print($"dn2cpp: extra link flags (project setting): {extraLinkFlags}");
-            if (extraLinkLibs.Length > 0)
-                GD.Print($"dn2cpp: extra link libs (project setting): {extraLinkLibs}");
-            configureArgs.Add($"-DDN2CPP_APP_LINK_FLAGS={extraLinkFlags}");
-            configureArgs.Add($"-DDN2CPP_APP_LINK_LIBS={extraLinkLibs}");
-
-            if (targetsWeb)
-            {
-                // emcmake runs cmake with Emscripten's own CMake toolchain file
-                // injected, which is what selects em++, the wasm target and the
-                // side-module link together — the same reason the Android arm above
-                // spells no compiler either. Only the configure is wrapped: the
-                // cache it writes carries the toolchain into every later build.
-                var emcmakeArgs = new List<string> { _cmakeExe };
-                emcmakeArgs.AddRange(configureArgs);
-                RunTool(_emcmakeExe!, emcmakeArgs, "configuring the native build");
-            }
-            else
-            {
-                RunTool(_cmakeExe, configureArgs, "configuring the native build");
-            }
-
-            RunTool(_cmakeExe, new List<string> { "--build", buildDir }, "compiling the drop-in library");
-
+        /// <summary>
+        /// Copies the library the native build produced into a staging directory of
+        /// its own, under the name the engine opens, and returns that directory.
+        /// </summary>
+        private string StageBuiltLibrary(string buildDir, string stageDir, string targetName,
+            string assemblyName, bool targetsWindows, bool targetsAndroid, bool targetsWeb)
+        {
             // What CMake names a SHARED target's output is the platform's rule, not
             // one convention, and the three Unix-family targets already needed three
             // different answers. On Apple the linker writes lib<name>.dylib and the
@@ -692,15 +740,12 @@ namespace GodotTools.Export
             string stagedLibrary = Path.Combine(stageDir, stagedName);
             File.Copy(builtLibrary, stagedLibrary, overwrite: true);
 
-            if (targetsIOS)
-            {
-                // The backend-agnostic iOS packaging tail lipos {assembly}.dylib
-                // out of every publish directory and wraps the results into the
-                // _aot.xcframework the exported app embeds, so the library also
-                // goes where a NativeAOT publish would have left it.
-                File.Copy(builtLibrary, Path.Combine(publishOutputDir, $"{assemblyName}.dylib"), overwrite: true);
-            }
-
+            // Nothing copies it into the publish directory as well. The iOS
+            // packaging tail lipos one {assembly}.dylib per entry of the export's
+            // output-path list, and under this backend those entries ARE these
+            // staging directories: the publish directory is shared by every slot
+            // of the export, so a dylib written there would be one file for three
+            // architectures (ExportPlugin, dn2CppPublishDir).
             LogLine($"staged {stagedLibrary}");
             GD.Print($"dn2cpp: staged {stagedLibrary}");
 
