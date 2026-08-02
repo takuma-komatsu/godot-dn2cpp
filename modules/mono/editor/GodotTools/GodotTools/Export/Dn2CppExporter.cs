@@ -128,6 +128,19 @@ namespace GodotTools.Export
         /// </remarks>
         private readonly HashSet<string> _transpiled = new HashSet<string>();
 
+        /// <summary>
+        /// The slot layout of <c>.godot/mono/dn2cpp</c>, recorded in the work dir as
+        /// <c>layout.txt</c>. Bump it whenever a slot's NAME changes: 2 is GE-6's
+        /// per-config <c>il/</c> and <c>gen/</c>, 1 the per-RID ones before it (and
+        /// an unmarked work dir is 1 or older).
+        /// </summary>
+        private const int WorkDirLayout = 2;
+
+        /// <summary>The directories under the work dir this exporter writes, and the only ones it deletes.</summary>
+        private static readonly string[] WorkDirTrees = { "il", "gen", "build", "stage" };
+
+        private bool _workDirPruned;
+
         private Dn2CppExporter(Dn2CppToolchain toolchain, string cmakeExe, string godotPlatform,
             string? androidNdkRoot, string? emcmakeExe)
         {
@@ -453,6 +466,7 @@ namespace GodotTools.Export
             }
 
             string workDir = Path.Combine(MonoDataDir, "dn2cpp");
+            PruneWorkDirGenerations(workDir);
             // The Godot platform is part of the slot, not just the build config and
             // the runtime identifier. The Web builds under the host's RID, so a macOS
             // export and a Web export of one project would otherwise land in the same
@@ -1264,6 +1278,84 @@ namespace GodotTools.Export
             if (Directory.Exists(path))
                 Directory.Delete(path, recursive: true);
             Directory.CreateDirectory(path);
+        }
+
+        /// <summary>
+        /// Discard the work-dir trees an earlier slot layout wrote, once per export.
+        /// </summary>
+        /// <remarks>
+        /// <para>Every directory under the work dir is named for the export target it
+        /// serves, and that naming has changed once already: GE-6 made <c>il/</c> and
+        /// <c>gen/</c> per-config where they had been per-RID, orphaning three ~90 MB
+        /// trees in every iOS project. Nothing collected them, and nothing could — the
+        /// four <see cref="RecreateDirectory"/> sites each clear the slot they are
+        /// about to rewrite, so by construction they never reach a name no export
+        /// computes any more.</para>
+        /// <para>Hence a RECORDED generation rather than an inferred one. Deciding
+        /// from a directory's name whether some export could still produce it would be
+        /// a second, drifting expression of the slot spelling whose failure direction
+        /// is deleting a live cache; an integer answers the narrower question "this
+        /// tree was written by a layout I do not know", whose remedy is the same
+        /// whatever that layout was. Being wrong costs one rebuild: <c>il/</c>,
+        /// <c>gen/</c> and <c>stage/</c> are recreated by every export in any case, and
+        /// <c>build/</c> is a compile cache the next export refills.</para>
+        /// </remarks>
+        private void PruneWorkDirGenerations(string workDir)
+        {
+            if (_workDirPruned)
+                return;
+            _workDirPruned = true;
+
+            Directory.CreateDirectory(workDir);
+            string marker = Path.Combine(workDir, "layout.txt");
+            string current = WorkDirLayout.ToString(CultureInfo.InvariantCulture);
+            string? recorded = File.Exists(marker) ? File.ReadAllText(marker).Trim() : null;
+            if (string.Equals(recorded, current, StringComparison.Ordinal))
+                return;
+
+            long reclaimed = 0;
+            var removed = new List<string>();
+            foreach (string tree in WorkDirTrees)
+            {
+                // Every path deleted here is a name spelled above joined to the work
+                // dir this exporter computed — never one read back out of the tree.
+                string path = Path.Combine(workDir, tree);
+                if (!Directory.Exists(path))
+                    continue;
+                reclaimed += DirectorySize(path);
+                Directory.Delete(path, recursive: true);
+                removed.Add(tree);
+            }
+
+            if (removed.Count > 0)
+            {
+                string what = $"work dir written by slot layout {recorded ?? "<unmarked>"}, this editor " +
+                    $"writes {current} — removed {string.Join(", ", removed)} ({reclaimed / (1024 * 1024)} MB) " +
+                    $"under {workDir}";
+                GD.Print($"dn2cpp: {what}");
+                LogLine(what);
+            }
+
+            File.WriteAllText(marker, current + "\n");
+        }
+
+        /// <summary>Bytes held by a directory tree, for the reclaimed-space report.</summary>
+        private static long DirectorySize(string path)
+        {
+            long total = 0;
+            try
+            {
+                foreach (string file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
+                    total += new FileInfo(file).Length;
+            }
+            catch (IOException)
+            {
+                // A size is a diagnostic; a tree that cannot be walked is still deleted.
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
+            return total;
         }
 
         /// <summary>
