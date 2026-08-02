@@ -1958,6 +1958,13 @@ const GodotAudioWorklet = {
 			GodotAudioWorklet.promise = GodotAudio.ctx.audioWorklet
 				.addModule(path)
 				.then(function () {
+					// The context can be closed while the module is loading -- a
+					// game that quits within its first frames. close_async() nulls
+					// it, and AudioWorkletNode(null, ...) would throw out of this
+					// chain, leaving close() below waiting on it forever.
+					if (!GodotAudio.ctx) {
+						return Promise.resolve();
+					}
 					GodotAudioWorklet.worklet = new AudioWorkletNode(
 						GodotAudio.ctx,
 						'godot-processor',
@@ -1973,6 +1980,11 @@ const GodotAudioWorklet = {
 		start: function (in_buf, out_buf, state) {
 			GodotAudioWorklet.promise.then(function () {
 				const node = GodotAudioWorklet.worklet;
+				// No node, or no context: the driver was closed while the module
+				// loaded. Nothing to start.
+				if (node === null || !GodotAudio.ctx) {
+					return;
+				}
 				node.connect(GodotAudio.ctx.destination);
 				node.port.postMessage({
 					'cmd': 'start',
@@ -2047,6 +2059,10 @@ const GodotAudioWorklet = {
 			GodotAudioWorklet.ring_buffer = new RingBuffer();
 			GodotAudioWorklet.promise.then(function () {
 				const node = GodotAudioWorklet.worklet;
+				// See start(): closed while the module loaded.
+				if (node === null || !GodotAudio.ctx) {
+					return;
+				}
 				const buffer = GodotRuntime.heapSlice(HEAPF32, p_out_buf, p_out_size);
 				node.connect(GodotAudio.ctx.destination);
 				node.port.postMessage({
@@ -2083,23 +2099,32 @@ const GodotAudioWorklet = {
 
 		close: function () {
 			return new Promise(function (resolve, reject) {
+				// Every path here must settle: GodotAudio.close_async() chains the
+				// exit on this promise, so one that never resolves is a game that
+				// cannot shut down rather than an audio node left connected.
 				if (GodotAudioWorklet.promise === null) {
+					resolve();
 					return;
 				}
 				const p = GodotAudioWorklet.promise;
 				p.then(function () {
-					GodotAudioWorklet.worklet.port.postMessage({
-						'cmd': 'stop',
-						'data': null,
-					});
-					GodotAudioWorklet.worklet.disconnect();
-					GodotAudioWorklet.worklet.port.onmessage = null;
-					GodotAudioWorklet.worklet = null;
+					// Null when the context closed before the module finished
+					// loading; there is no node to stop.
+					if (GodotAudioWorklet.worklet !== null) {
+						GodotAudioWorklet.worklet.port.postMessage({
+							'cmd': 'stop',
+							'data': null,
+						});
+						GodotAudioWorklet.worklet.disconnect();
+						GodotAudioWorklet.worklet.port.onmessage = null;
+						GodotAudioWorklet.worklet = null;
+					}
 					GodotAudioWorklet.promise = null;
 					resolve();
 				}).catch(function (err) {
 					// Aborted?
 					GodotRuntime.error(err);
+					resolve();
 				});
 			});
 		},
