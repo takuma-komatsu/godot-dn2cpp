@@ -347,6 +347,19 @@ namespace GodotTools.Export
 
             List<string> outputPaths = new();
 
+            // The publish output every slot of a dn2cpp export shares, once one has
+            // run. That backend consumes the game IL and nothing else, and the IL is
+            // a function of the build config rather than of the RID the publish ran
+            // under — the RID selects an apphost and a runtime pack, both of which
+            // this backend switches off above. So the export publishes once and
+            // transpiles once, and its slots differ only in the native compile.
+            //
+            // One publish rather than a cache keyed on the publish OUTPUT, which is
+            // the shape that looks equivalent and is not: two publishes of one game
+            // differ in the MVID and the PE timestamp, so a content key would merge
+            // an incidental subset of the slots.
+            string? dn2CppPublishDir = null;
+
             // Not on the Web, whatever the option says. There the drop-in has to
             // land next to index.html as a file the loader can fetch and register
             // before main() runs: AddSharedObject is what puts it there (and into
@@ -378,45 +391,55 @@ namespace GodotTools.Export
                     // Create temporary publish output directory.
                     string publishOutputDir;
 
-                    if (config.UseTempDir)
+                    if (dn2CppPublishDir is not null)
                     {
-                        publishOutputDir = Path.Combine(Path.GetTempPath(), "godot-publish-dotnet",
-                            $"{System.Environment.ProcessId}-{buildConfig}-{runtimeIdentifier}");
-                        _tempFolders.Add(publishOutputDir);
+                        // An earlier slot of this export already published the IL
+                        // this one transpiles; see the declaration.
+                        publishOutputDir = dn2CppPublishDir;
                     }
                     else
                     {
-                        publishOutputDir = Path.Combine(GodotSharpDirs.ProjectBaseOutputPath, "godot-publish-dotnet",
-                            $"{buildConfig}-{runtimeIdentifier}");
-                    }
+                        if (config.UseTempDir)
+                        {
+                            publishOutputDir = Path.Combine(Path.GetTempPath(), "godot-publish-dotnet",
+                                $"{System.Environment.ProcessId}-{buildConfig}-{runtimeIdentifier}");
+                            _tempFolders.Add(publishOutputDir);
+                        }
+                        else
+                        {
+                            publishOutputDir = Path.Combine(GodotSharpDirs.ProjectBaseOutputPath, "godot-publish-dotnet",
+                                $"{buildConfig}-{runtimeIdentifier}");
+                        }
 
-                    outputPaths.Add(publishOutputDir);
+                        if (!Directory.Exists(publishOutputDir))
+                            Directory.CreateDirectory(publishOutputDir);
 
-                    if (!Directory.Exists(publishOutputDir))
-                        Directory.CreateDirectory(publishOutputDir);
+                        // Execute dotnet publish.
+                        if (!BuildManager.PublishProjectBlocking(buildConfig, platform,
+                                runtimeIdentifier, publishOutputDir, includeDebugSymbols, publishProperties))
+                        {
+                            throw new InvalidOperationException("Failed to build project. Check MSBuild panel for details.");
+                        }
 
-                    // Execute dotnet publish.
-                    if (!BuildManager.PublishProjectBlocking(buildConfig, platform,
-                            runtimeIdentifier, publishOutputDir, includeDebugSymbols, publishProperties))
-                    {
-                        throw new InvalidOperationException("Failed to build project. Check MSBuild panel for details.");
-                    }
+                        string soExt = ridOS switch
+                        {
+                            OS.DotNetOS.Win or OS.DotNetOS.Win10 => "dll",
+                            OS.DotNetOS.OSX or OS.DotNetOS.iOS or OS.DotNetOS.iOSSimulator => "dylib",
+                            _ => "so"
+                        };
 
-                    string soExt = ridOS switch
-                    {
-                        OS.DotNetOS.Win or OS.DotNetOS.Win10 => "dll",
-                        OS.DotNetOS.OSX or OS.DotNetOS.iOS or OS.DotNetOS.iOSSimulator => "dylib",
-                        _ => "so"
-                    };
+                        string assemblyPath = Path.Combine(publishOutputDir, $"{GodotSharpDirs.ProjectAssemblyName}.dll");
+                        string nativeAotPath = Path.Combine(publishOutputDir,
+                            $"{GodotSharpDirs.ProjectAssemblyName}.{soExt}");
 
-                    string assemblyPath = Path.Combine(publishOutputDir, $"{GodotSharpDirs.ProjectAssemblyName}.dll");
-                    string nativeAotPath = Path.Combine(publishOutputDir,
-                        $"{GodotSharpDirs.ProjectAssemblyName}.{soExt}");
+                        if (!File.Exists(assemblyPath) && !File.Exists(nativeAotPath))
+                        {
+                            throw new NotSupportedException(
+                                $"Publish succeeded but project assembly not found at '{assemblyPath}' or '{nativeAotPath}'.");
+                        }
 
-                    if (!File.Exists(assemblyPath) && !File.Exists(nativeAotPath))
-                    {
-                        throw new NotSupportedException(
-                            $"Publish succeeded but project assembly not found at '{assemblyPath}' or '{nativeAotPath}'.");
+                        if (dn2CppExporter is not null)
+                            dn2CppPublishDir = publishOutputDir;
                     }
 
                     // The dn2cpp backend ships a single drop-in library in place of
@@ -427,6 +450,14 @@ namespace GodotTools.Export
                     // xcframework tail after this loop.
                     string? dn2CppContentsDir = dn2CppExporter?.BuildDropIn(publishOutputDir,
                         GodotSharpDirs.ProjectAssemblyName, buildConfig, runtimeIdentifier, arch);
+
+                    // Where THIS slot's library landed, for the iOS tail below: it
+                    // reads one {Assembly}.dylib per entry, so an entry has to be a
+                    // per-slot directory. The publish directory is that only for the
+                    // backends that leave the library in it; a dn2cpp export shares
+                    // one publish directory across its slots and stages each slot's
+                    // library into a directory of its own.
+                    outputPaths.Add(dn2CppContentsDir ?? publishOutputDir);
 
                     // For ios simulator builds, skip packaging the build outputs.
                     if (!config.BundleOutputs)
