@@ -139,6 +139,12 @@ namespace GodotTools.Export
         /// <summary>The directories under the work dir this exporter writes, and the only ones it deletes.</summary>
         private static readonly string[] WorkDirTrees = { "il", "gen", "build", "stage" };
 
+        /// <summary>
+        /// How many export logs the project keeps, this export's included. One per
+        /// export, no other writer, and nothing ever removed them.
+        /// </summary>
+        private const int LogGenerations = 20;
+
         private bool _workDirPruned;
 
         private Dn2CppExporter(Dn2CppToolchain toolchain, string cmakeExe, string godotPlatform,
@@ -155,6 +161,7 @@ namespace GodotTools.Export
             Directory.CreateDirectory(logsDir);
             _logPath = Path.Combine(logsDir, $"export-{timestamp}.log");
             _log = new StreamWriter(_logPath, append: false) { AutoFlush = true };
+            PruneExportLogs(logsDir);
 
             LogLine($"toolchain: {toolchain.RootDir} ({toolchain.Source})");
             LogLine($"manifest:  {toolchain.DescribeManifest()}");
@@ -1337,6 +1344,47 @@ namespace GodotTools.Export
             }
 
             File.WriteAllText(marker, current + "\n");
+        }
+
+        /// <summary>
+        /// Keep the newest <see cref="LogGenerations"/> export logs and delete the rest.
+        /// </summary>
+        /// <remarks>
+        /// <para>A COUNT, not an age: what makes a log worth keeping is being one of
+        /// the last few exports, and a project exported once a quarter would keep
+        /// nothing to compare against under any age that bounds a project exported
+        /// hourly. Newest is decided by an ordinal sort of the NAMES — the timestamp
+        /// this constructor spells sorts that way by construction, whereas a file's
+        /// mtime is rewritten by copying the project.</para>
+        /// <para>Every path deleted is a name this same constructor spelled, under the
+        /// directory it computed; nothing else writes there. A prune that cannot run
+        /// is not an export failure — the logs are a diagnostic.</para>
+        /// </remarks>
+        private void PruneExportLogs(string logsDir)
+        {
+            try
+            {
+                foreach (string old in Directory.GetFiles(logsDir, "export-*.log")
+                             // Windows matches a pattern against the 8.3 short name as
+                             // well, so the shape is re-tested on the real one.
+                             .Where(f => Path.GetFileName(f).StartsWith("export-", StringComparison.Ordinal)
+                                 && Path.GetFileName(f).EndsWith(".log", StringComparison.Ordinal))
+                             .OrderByDescending(f => Path.GetFileName(f), StringComparer.Ordinal)
+                             .Skip(LogGenerations)
+                             .ToList())
+                {
+                    File.Delete(old);
+                    LogLine($"removed the superseded export log {Path.GetFileName(old)}");
+                }
+            }
+            catch (IOException e)
+            {
+                LogLine($"could not prune the export logs under {logsDir}: {e.Message}");
+            }
+            catch (UnauthorizedAccessException e)
+            {
+                LogLine($"could not prune the export logs under {logsDir}: {e.Message}");
+            }
         }
 
         /// <summary>Bytes held by a directory tree, for the reclaimed-space report.</summary>
