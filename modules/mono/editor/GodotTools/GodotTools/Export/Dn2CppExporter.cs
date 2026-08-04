@@ -107,7 +107,7 @@ namespace GodotTools.Export
         private readonly string _cmakeExe;
         private readonly string _godotPlatform;
         private readonly string? _androidNdkRoot;
-        private readonly string? _emcmakeExe;
+        private readonly EmscriptenSdk? _emscripten;
         private readonly string _logPath;
         private readonly StreamWriter _log;
         private readonly Queue<string> _logTail = new Queue<string>();
@@ -148,13 +148,13 @@ namespace GodotTools.Export
         private bool _workDirPruned;
 
         private Dn2CppExporter(Dn2CppToolchain toolchain, string cmakeExe, string godotPlatform,
-            string? androidNdkRoot, string? emcmakeExe)
+            string? androidNdkRoot, EmscriptenSdk? emscripten)
         {
             _toolchain = toolchain;
             _cmakeExe = cmakeExe;
             _godotPlatform = godotPlatform;
             _androidNdkRoot = androidNdkRoot;
-            _emcmakeExe = emcmakeExe;
+            _emscripten = emscripten;
 
             string timestamp = DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
             string logsDir = Path.Combine(GodotSharpDirs.ProjectBaseOutputPath, "dn2cpp", "logs");
@@ -167,6 +167,11 @@ namespace GodotTools.Export
             LogLine($"manifest:  {toolchain.DescribeManifest()}");
             GD.Print($"dn2cpp: using the toolchain at {toolchain.RootDir} ({toolchain.Source})");
             GD.Print($"dn2cpp: {toolchain.DescribeManifest()}");
+            if (emscripten is not null)
+            {
+                LogLine($"emscripten: {emscripten.Version} ({emscripten.Origin})");
+                GD.Print($"dn2cpp: emscripten {emscripten.Version} ({emscripten.Origin})");
+            }
             GD.Print($"dn2cpp: export log: {_logPath}");
         }
 
@@ -322,6 +327,15 @@ namespace GodotTools.Export
                     : "clang++ or g++");
             }
 
+            // Emscripten's compiler driver and its wasm tools run on node, and the
+            // bundled SDK carries none: a pinned node is a second runtime to keep
+            // patched, and every machine that can build a game already has one to
+            // hand. Asked here so a Web export refuses before the publish rather
+            // than in the middle of the link.
+            bool needsNode = godotPlatform == OS.Platforms.Web && OS.PathWhich("node") is null;
+            if (needsNode)
+                missingTools.Add("node (Node.js 18 or newer)");
+
             if (missingTools.Count > 0)
             {
                 // Three arms, not two, and the third is not hypothetical: a host that
@@ -346,6 +360,13 @@ namespace GodotTools.Export
                         : "Install it with your distribution's package manager (e.g. 'apt install clang cmake " +
                           "ninja-build'), then restart the editor from a shell that has the tools on PATH.";
 
+                if (needsNode)
+                {
+                    remedy += "\nThe bundled toolchain intentionally does not carry node; install Node.js 18 or " +
+                        "newer (e.g. 'brew install node', 'apt install nodejs', or nodejs.org) and restart the " +
+                        "editor.";
+                }
+
                 throw new NotSupportedException(
                     "The dn2cpp export backend needs a C++ toolchain that is not on PATH: " +
                     $"{string.Join(", ", missingTools)}.\n" + remedy);
@@ -365,13 +386,15 @@ namespace GodotTools.Export
             if (godotPlatform == OS.Platforms.Web)
                 VerifyCMakeCanBuildWasmSharedLibs(cmakeExe!, cmakeVersion);
 
-            // Resolved here, for the same reason: an absent NDK is a refusal
-            // before the publish, not a cmake error twenty minutes in.
-            string? androidNdkRoot = godotPlatform == OS.Platforms.Android ? ResolveAndroidNdk() : null;
-            string? emcmakeExe = godotPlatform == OS.Platforms.Web ? ResolveEmscripten() : null;
-
             if (!Dn2CppToolchain.TryResolve(out Dn2CppToolchain? toolchain, out string toolchainError))
                 throw new NotSupportedException(toolchainError);
+
+            // Resolved here, for the same reason: an absent NDK is a refusal
+            // before the publish, not a cmake error twenty minutes in. The
+            // Emscripten SDK is asked of the bundle first, so the toolchain has to
+            // be resolved before it.
+            string? androidNdkRoot = godotPlatform == OS.Platforms.Android ? ResolveAndroidNdk() : null;
+            EmscriptenSdk? emscripten = godotPlatform == OS.Platforms.Web ? ResolveEmscripten(toolchain) : null;
 
             // A cross-target export off a Windows host transpiles the POSIX-flavour
             // framework, not the bundle's host one (Dn2CppToolchain.NeedsCrossCoreLib
@@ -393,7 +416,7 @@ namespace GodotTools.Export
                     "none is installed.");
             }
 
-            return new Dn2CppExporter(toolchain, cmakeExe!, godotPlatform, androidNdkRoot, emcmakeExe);
+            return new Dn2CppExporter(toolchain, cmakeExe!, godotPlatform, androidNdkRoot, emscripten);
         }
 
         /// <summary>
@@ -579,7 +602,7 @@ namespace GodotTools.Export
                 // cache it writes carries the toolchain into every later build.
                 var emcmakeArgs = new List<string> { _cmakeExe };
                 emcmakeArgs.AddRange(configureArgs);
-                RunTool(_emcmakeExe!, emcmakeArgs, "configuring the native build");
+                RunTool(_emscripten!.EmcmakeExe, emcmakeArgs, "configuring the native build");
             }
             else
             {
@@ -1033,15 +1056,81 @@ namespace GodotTools.Export
             File.Exists(Path.Combine(ndkRoot, "build", "cmake", "android.toolchain.cmake"));
 
         /// <summary>
-        /// The Emscripten SDK the Web cross-build compiles through, resolved to the
-        /// <c>emcmake</c> the configure runs under. <c>em++</c> is probed beside it
-        /// because emcmake alone proves nothing: it is a thin wrapper that would
-        /// hand cmake a toolchain file naming a compiler that is not there, and the
-        /// failure would land in cmake's compiler check with nothing pointing at the
-        /// SDK.
+        /// The Emscripten SDK a Web export cross-compiles through: the
+        /// <c>emcmake</c> the configure runs under, the environment every tool
+        /// under it inherits, and where it was found.
         /// </summary>
-        private static string ResolveEmscripten()
+        private sealed class EmscriptenSdk
         {
+            public EmscriptenSdk(string emcmakeExe, Dictionary<string, string?>? env, string origin, string version)
+            {
+                EmcmakeExe = emcmakeExe;
+                Env = env;
+                Origin = origin;
+                Version = version;
+            }
+
+            public string EmcmakeExe { get; }
+
+            /// <summary>
+            /// Environment overlay for every tool this export runs, a null VALUE
+            /// meaning "remove". Null for an SDK taken from PATH, which is
+            /// configured by whoever put it there — see <see cref="ResolveEmscripten"/>.
+            /// </summary>
+            public Dictionary<string, string?>? Env { get; }
+
+            public string Origin { get; }
+
+            public string Version { get; }
+        }
+
+        /// <summary>
+        /// Variables an activated emsdk exports into the shell. An editor started
+        /// from such a shell inherits them, and each one would redirect the bundled
+        /// SDK's compiler driver at that other SDK's LLVM, binaryen, cache or node —
+        /// so a bundled SDK runs with all of them removed rather than merely
+        /// out-ranked.
+        /// </summary>
+        private static readonly string[] ActivatedEmsdkVars =
+        {
+            "EM_CACHE", "EM_LLVM_ROOT", "EM_BINARYEN_ROOT", "EM_FROZEN_CACHE",
+            "EMSDK", "EMSDK_NODE", "EMSCRIPTEN",
+        };
+
+        /// <summary>
+        /// Resolves the SDK the Web build compiles through: an editor setting
+        /// naming one, else the bundle's own, else PATH. The bundle outranks PATH
+        /// because it is the SDK this editor's runtime was packaged against, and
+        /// only the first two carry a config this backend can point every tool at.
+        /// </summary>
+        private static EmscriptenSdk ResolveEmscripten(Dn2CppToolchain toolchain)
+        {
+            string overridePath = Dn2CppToolchain.GetEditorSetting(Dn2CppToolchain.EmsdkPathSetting);
+            if (overridePath.Length > 0)
+            {
+                string emsdkDir = Path.GetFullPath(overridePath);
+                if (!Dn2CppToolchain.IsEmsdkLayout(emsdkDir))
+                {
+                    throw new NotSupportedException(
+                        $"The editor setting '{Dn2CppToolchain.EmsdkPathSetting}' points at '{emsdkDir}', which is " +
+                        "not an Emscripten SDK: it must hold " +
+                        $"'{Dn2CppToolchain.EmsdkEmcmakeIn(emsdkDir)}' and " +
+                        $"'{Dn2CppToolchain.EmsdkConfigIn(emsdkDir)}'.\n" +
+                        "Point it at an emsdk's active SDK directory, or clear it to use the bundled SDK.");
+                }
+
+                return BundledEmscripten(emsdkDir,
+                    $"bundled: {emsdkDir}, editor setting '{Dn2CppToolchain.EmsdkPathSetting}'");
+            }
+
+            if (toolchain.HasEmsdk)
+                return BundledEmscripten(toolchain.EmsdkDir, $"bundled: {toolchain.EmsdkDir}");
+
+            // No SDK travelled with this bundle, so the host has to supply one.
+            // em++ is probed beside emcmake because emcmake alone proves nothing:
+            // it is a thin wrapper that would hand cmake a toolchain file naming a
+            // compiler that is not there, and the failure would land in cmake's
+            // compiler check with nothing pointing at the SDK.
             string? emcmakeExe = OS.PathWhich("emcmake");
 
             var missingTools = new List<string>();
@@ -1054,14 +1143,68 @@ namespace GodotTools.Export
             {
                 throw new NotSupportedException(
                     "The dn2cpp export backend compiles the game for the Web with Emscripten, which is not on " +
-                    $"PATH: {string.Join(", ", missingTools)}.\n" +
+                    $"PATH: {string.Join(", ", missingTools)}. This toolchain bundle carries no SDK either " +
+                    $"('{toolchain.EmsdkDir}' is not one), which is what a bundle packaged on a host that had " +
+                    "one would ship.\n" +
                     "Install the Emscripten SDK ('brew install emscripten', or emsdk's own installer), activate " +
                     "it in the environment the editor is launched from ('source /path/to/emsdk/emsdk_env.sh'), " +
                     "and restart the editor. An editor launched from Finder inherits a minimal PATH, so an SDK a " +
-                    "terminal finds can be invisible to it.");
+                    "terminal finds can be invisible to it; the editor setting " +
+                    $"'{Dn2CppToolchain.EmsdkPathSetting}' names one directly.");
             }
 
-            return emcmakeExe!;
+            // Nothing is injected into the environment of an SDK taken from PATH:
+            // it is the environment that selected that SDK, and overwriting
+            // EM_CONFIG or PATH under it would change a build that already works.
+            return new EmscriptenSdk(emcmakeExe!, null, $"PATH: {emcmakeExe}",
+                ReadEmscriptenVersion(Path.GetDirectoryName(emcmakeExe!) ?? string.Empty));
+        }
+
+        private static EmscriptenSdk BundledEmscripten(string emsdkDir, string origin)
+        {
+            string emscriptenDir = Path.Combine(emsdkDir, "emscripten");
+            string path = System.Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+
+            var env = new Dictionary<string, string?>();
+            foreach (string activated in ActivatedEmsdkVars)
+                env[activated] = null;
+
+            env["EM_CONFIG"] = Dn2CppToolchain.EmsdkConfigIn(emsdkDir);
+            env["PATH"] = path.Length > 0 ? emscriptenDir + Path.PathSeparator + path : emscriptenDir;
+
+            // The bundled cache is baked and frozen, so a link needing a
+            // system-library variant nothing baked fails instead of building one.
+            // A writable cache is the way out, and un-freezing it is half of it.
+            string cachePath = Dn2CppToolchain.GetEditorSetting(Dn2CppToolchain.EmsdkCachePathSetting);
+            if (cachePath.Length > 0)
+            {
+                env["EM_CACHE"] = Path.GetFullPath(cachePath);
+                env["EM_FROZEN_CACHE"] = "0";
+            }
+
+            return new EmscriptenSdk(Dn2CppToolchain.EmsdkEmcmakeIn(emsdkDir), env, origin,
+                ReadEmscriptenVersion(emscriptenDir));
+        }
+
+        /// <summary>
+        /// The SDK's version, read from the file it states it in rather than by
+        /// running emcc — which would want node and a warm cache before the export
+        /// has decided it can run at all.
+        /// </summary>
+        private static string ReadEmscriptenVersion(string emscriptenDir)
+        {
+            try
+            {
+                string versionFile = Path.Combine(emscriptenDir, "emscripten-version.txt");
+
+                return File.Exists(versionFile)
+                    ? File.ReadAllText(versionFile).Trim().Trim('"')
+                    : "unknown version";
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                return "unknown version";
+            }
         }
 
         /// <summary>
@@ -1243,6 +1386,21 @@ namespace GodotTools.Export
             foreach (string arg in args)
                 process.StartInfo.ArgumentList.Add(arg);
 
+            // Applied to every step, not to the configure alone: the build runs
+            // cmake, cmake runs ninja and ninja runs emcc, and it is emcc that
+            // reads EM_CONFIG — an environment set for the configure only would
+            // configure with the bundled SDK and compile with somebody else's.
+            if (_emscripten?.Env is { } emsdkEnv)
+            {
+                foreach ((string name, string? value) in emsdkEnv)
+                {
+                    if (value is null)
+                        process.StartInfo.Environment.Remove(name);
+                    else
+                        process.StartInfo.Environment[name] = value;
+                }
+            }
+
             process.OutputDataReceived += (_, e) => LogLine(e.Data);
             process.ErrorDataReceived += (_, e) => LogLine(e.Data);
 
@@ -1257,10 +1415,27 @@ namespace GodotTools.Export
             var message = new StringBuilder();
             message.Append(CultureInfo.InvariantCulture, $"dn2cpp export failed while {step} (exit code {process.ExitCode}).\n");
             message.Append(CultureInfo.InvariantCulture, $"Full log: {_logPath}\n\n");
+
+            bool frozenCache = false;
             lock (_logTail)
             {
                 foreach (string line in _logTail)
+                {
+                    frozenCache |= line.Contains("FROZEN_CACHE", StringComparison.Ordinal);
                     message.Append(line).Append('\n');
+                }
+            }
+
+            // Emscripten's own message names the variable and no way out of it: the
+            // bundled SDK's cache is baked for the flags this backend passes, and a
+            // build that adds others (-pthread) needs a variant nothing baked.
+            if (frozenCache && _emscripten?.Env is not null)
+            {
+                message.Append(CultureInfo.InvariantCulture,
+                    $"\nThe bundled Emscripten SDK carries a read-only, pre-built cache, and this build needs a " +
+                    $"system-library variant it does not hold. Set the editor setting " +
+                    $"'{Dn2CppToolchain.EmsdkCachePathSetting}' to a writable directory and export again — the " +
+                    $"missing variant is built there once.\n");
             }
 
             throw new InvalidOperationException(message.ToString());
