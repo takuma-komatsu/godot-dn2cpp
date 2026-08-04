@@ -23,6 +23,20 @@ namespace GodotTools.Utils
         /// </summary>
         public const string ToolchainPathSetting = "dotnet/export/dn2cpp_toolchain_path";
 
+        /// <summary>
+        /// Editor setting pointing at an Emscripten SDK layout to use instead of
+        /// the bundled one, and ahead of any SDK on PATH.
+        /// </summary>
+        public const string EmsdkPathSetting = "dotnet/export/dn2cpp_emsdk_path";
+
+        /// <summary>
+        /// Editor setting pointing at a writable Emscripten cache directory. The
+        /// bundled SDK carries a baked, frozen cache, so a link that needs a
+        /// system-library variant nothing baked (a <c>-pthread</c> build, say)
+        /// fails rather than building it; this is the way out.
+        /// </summary>
+        public const string EmsdkCachePathSetting = "dotnet/export/dn2cpp_emsdk_cache_path";
+
         private Dn2CppToolchain(string rootDir, string source)
         {
             RootDir = rootDir;
@@ -108,6 +122,47 @@ namespace GodotTools.Utils
         /// <summary>CMake source dir for the runtime the generated C++ links against.</summary>
         public string RuntimeDir => Path.Combine(RootDir, "runtime");
 
+        /// <summary>
+        /// The bundled Emscripten SDK a Web export cross-compiles through. Only a
+        /// bundle packaged on a host that had an SDK carries one, so its absence
+        /// is normal and never a broken layout — see <see cref="TryValidate"/>.
+        /// </summary>
+        public string EmsdkDir => Path.Combine(RootDir, "emsdk");
+
+        /// <summary>The wrapper that hands cmake Emscripten's own toolchain file.</summary>
+        public string EmsdkEmcmake => EmsdkEmcmakeIn(EmsdkDir);
+
+        /// <summary>
+        /// The SDK's own config. It is written relative to <c>$CFGDIR</c>, so the
+        /// bundle stays relocatable; every tool under the SDK is pointed at it
+        /// through <c>EM_CONFIG</c>.
+        /// </summary>
+        public string EmsdkConfig => EmsdkConfigIn(EmsdkDir);
+
+        /// <summary>Whether this bundle carries a usable Emscripten SDK.</summary>
+        public bool HasEmsdk => IsEmsdkLayout(EmsdkDir);
+
+        /// <summary>
+        /// <c>emcmake</c> under an arbitrary SDK root — the editor setting names
+        /// one this class knows nothing else about.
+        /// </summary>
+        public static string EmsdkEmcmakeIn(string emsdkDir) =>
+            Path.Combine(emsdkDir, "emscripten", OS.IsWindows ? "emcmake.bat" : "emcmake");
+
+        /// <summary>The SDK config under an arbitrary SDK root.</summary>
+        public static string EmsdkConfigIn(string emsdkDir) =>
+            Path.Combine(emsdkDir, "emscripten", ".emscripten");
+
+        /// <summary>
+        /// Whether <paramref name="emsdkDir"/> is an SDK this backend can drive.
+        /// The config is asked for as well as the wrapper: without one, emcc falls
+        /// back to the user's <c>~/.emscripten</c> and compiles through another
+        /// SDK's LLVM.
+        /// </summary>
+        public static bool IsEmsdkLayout(string emsdkDir) =>
+            System.IO.File.Exists(EmsdkEmcmakeIn(emsdkDir))
+            && System.IO.File.Exists(EmsdkConfigIn(emsdkDir));
+
         /// <summary>The dn2cpp-to-fork version contract: commit, package version, godot pin, content hash.</summary>
         public string ManifestPath => Path.Combine(RootDir, "manifest.json");
 
@@ -170,6 +225,9 @@ namespace GodotTools.Utils
 
         private bool TryValidate(out string error)
         {
+            // The Emscripten SDK is deliberately not required here: only a Web
+            // export needs one, and demanding it would refuse every other target
+            // on a bundle packaged where no SDK was.
             foreach (string required in new[]
                      { Dn2CppExe, RuntimeShim, CoreLibRef, Path.Combine(RuntimeDir, "CMakeLists.txt") })
             {
@@ -212,15 +270,21 @@ namespace GodotTools.Utils
             }
         }
 
-        private static string GetSettingOverride()
+        private static string GetSettingOverride() => GetEditorSetting(ToolchainPathSetting);
+
+        /// <summary>
+        /// An editor setting as a string, empty when unset or when there is no
+        /// editor (the assembly is also loaded outside one).
+        /// </summary>
+        public static string GetEditorSetting(string name)
         {
             try
             {
                 EditorSettings? settings = EditorInterface.Singleton?.GetEditorSettings();
-                if (settings is null || !settings.HasSetting(ToolchainPathSetting))
+                if (settings is null || !settings.HasSetting(name))
                     return string.Empty;
 
-                return settings.GetSetting(ToolchainPathSetting).AsString();
+                return settings.GetSetting(name).AsString();
             }
             catch (InvalidOperationException)
             {

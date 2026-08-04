@@ -35,6 +35,8 @@ namespace GodotTools
             public const string CreateBinaryLog = "dotnet/build/create_binary_log";
             public const string ProblemsLayout = "dotnet/build/problems_layout";
             public const string Dn2CppToolchainPath = Dn2CppToolchain.ToolchainPathSetting;
+            public const string Dn2CppEmsdkPath = Dn2CppToolchain.EmsdkPathSetting;
+            public const string Dn2CppEmsdkCachePath = Dn2CppToolchain.EmsdkCachePathSetting;
         }
 
 #nullable disable
@@ -560,6 +562,10 @@ namespace GodotTools
 
             // Empty means "use the toolchain bundled with this editor".
             EditorDef(Settings.Dn2CppToolchainPath, "");
+            // Empty means "use the Emscripten SDK in that toolchain, else PATH".
+            EditorDef(Settings.Dn2CppEmsdkPath, "");
+            // Empty means "use the bundled SDK's own frozen cache".
+            EditorDef(Settings.Dn2CppEmsdkCachePath, "");
 
             string settingsHintStr = "Disabled";
 
@@ -633,6 +639,20 @@ namespace GodotTools
             {
                 ["type"] = (int)Variant.Type.String,
                 ["name"] = Settings.Dn2CppToolchainPath,
+                ["hint"] = (int)PropertyHint.GlobalDir,
+            });
+
+            _editorSettings.AddPropertyInfo(new Godot.Collections.Dictionary
+            {
+                ["type"] = (int)Variant.Type.String,
+                ["name"] = Settings.Dn2CppEmsdkPath,
+                ["hint"] = (int)PropertyHint.GlobalDir,
+            });
+
+            _editorSettings.AddPropertyInfo(new Godot.Collections.Dictionary
+            {
+                ["type"] = (int)Variant.Type.String,
+                ["name"] = Settings.Dn2CppEmsdkCachePath,
                 ["hint"] = (int)PropertyHint.GlobalDir,
             });
 
