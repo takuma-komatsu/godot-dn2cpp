@@ -144,10 +144,25 @@ namespace GodotTools.Utils
 
         /// <summary>
         /// <c>emcmake</c> under an arbitrary SDK root — the editor setting names
-        /// one this class knows nothing else about.
+        /// one this class knows nothing else about. The frontend's spelling is
+        /// the SDK's, not the OS's: an <c>emsdk install</c> tree ships
+        /// <c>.bat</c> wrappers, the bundled Windows SDK ships native
+        /// <c>.exe</c> launchers, a POSIX SDK bare scripts — take what exists.
         /// </summary>
-        public static string EmsdkEmcmakeIn(string emsdkDir) =>
-            Path.Combine(emsdkDir, "emscripten", OS.IsWindows ? "emcmake.bat" : "emcmake");
+        public static string EmsdkEmcmakeIn(string emsdkDir)
+        {
+            string emscriptenDir = Path.Combine(emsdkDir, "emscripten");
+            foreach (string name in new[] { "emcmake.bat", "emcmake.exe", "emcmake" })
+            {
+                string candidate = Path.Combine(emscriptenDir, name);
+                if (System.IO.File.Exists(candidate))
+                    return candidate;
+            }
+
+            // No frontend at all (IsEmsdkLayout refuses such a root); name the
+            // OS's usual spelling so the error message stays concrete.
+            return Path.Combine(emscriptenDir, OS.IsWindows ? "emcmake.bat" : "emcmake");
+        }
 
         /// <summary>The SDK config under an arbitrary SDK root.</summary>
         public static string EmsdkConfigIn(string emsdkDir) =>
