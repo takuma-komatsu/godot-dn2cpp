@@ -1087,14 +1087,15 @@ namespace GodotTools.Export
         /// <summary>
         /// Variables an activated emsdk exports into the shell. An editor started
         /// from such a shell inherits them, and each one would redirect the bundled
-        /// SDK's compiler driver at that other SDK's LLVM, binaryen, cache or node —
+        /// SDK's compiler driver at that other SDK's LLVM, binaryen, cache, node
+        /// or python —
         /// so a bundled SDK runs with all of them removed rather than merely
         /// out-ranked.
         /// </summary>
         private static readonly string[] ActivatedEmsdkVars =
         {
             "EM_CACHE", "EM_LLVM_ROOT", "EM_BINARYEN_ROOT", "EM_FROZEN_CACHE",
-            "EMSDK", "EMSDK_NODE", "EMSCRIPTEN",
+            "EMSDK", "EMSDK_NODE", "EMSDK_PYTHON", "EMSCRIPTEN",
         };
 
         /// <summary>
@@ -1171,6 +1172,12 @@ namespace GodotTools.Export
 
             env["EM_CONFIG"] = Dn2CppToolchain.EmsdkConfigIn(emsdkDir);
             env["PATH"] = path.Length > 0 ? emscriptenDir + Path.PathSeparator + path : emscriptenDir;
+
+            // Resolving the bundled python is the environment's job: the SDK's
+            // native frontends take EMSDK_PYTHON over any PATH search.
+            string bundledPython = Path.Combine(emsdkDir, "python", "python.exe");
+            if (File.Exists(bundledPython))
+                env["EMSDK_PYTHON"] = bundledPython;
 
             // The bundled cache is baked and frozen, so a link needing a
             // system-library variant nothing baked fails instead of building one.
