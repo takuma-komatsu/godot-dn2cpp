@@ -21,8 +21,8 @@ interop ABI (`unmanaged_callbacks[]` / `ManagedCallbacks.cs`) is untouched, so
 this engine stays a drop-in host for stock GodotSharp assemblies.
 
 Upstream base commit: `a13da4feb8d8aefc283c3763d33a2f170a18d541` (4.7.1-stable).
-Prebuilt binaries (macOS editor + Web export template) are on the
-[Releases](../../releases) page. The transpiler itself lives in
+Prebuilt binaries (macOS and Windows editors, macOS and Web export templates)
+are on the [Releases](../../releases) page. The transpiler itself lives in
 [takuma-komatsu/dn2cpp](https://github.com/takuma-komatsu/dn2cpp).
 
 This fork is not intended as a pull request to upstream Godot. Everything below
