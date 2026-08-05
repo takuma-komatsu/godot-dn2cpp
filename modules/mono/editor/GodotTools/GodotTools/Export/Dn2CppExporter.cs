@@ -94,6 +94,8 @@ namespace GodotTools.Export
         /// Emscripten's own CMake platform module sets
         /// <c>TARGET_SUPPORTS_SHARED_LIBS</c> to <see langword="false"/>.
         /// </summary>
+        // dn2cpp's gates/expected/buildtools-pin.txt is the cross-repo counterpart:
+        // a pin inside these bands ships a cmake this exporter refuses.
         private static readonly (Version First, Version PastLast)[] CMakeVersionsWithoutWasmSharedLibs =
         {
             (new Version(4, 2, 0), new Version(4, 2, 6)),
@@ -105,6 +107,7 @@ namespace GodotTools.Export
 
         private readonly Dn2CppToolchain _toolchain;
         private readonly string _cmakeExe;
+        private readonly string _ninjaExe;
         private readonly string _godotPlatform;
         private readonly string? _androidNdkRoot;
         private readonly EmscriptenSdk? _emscripten;
@@ -147,11 +150,12 @@ namespace GodotTools.Export
 
         private bool _workDirPruned;
 
-        private Dn2CppExporter(Dn2CppToolchain toolchain, string cmakeExe, string godotPlatform,
+        private Dn2CppExporter(Dn2CppToolchain toolchain, string cmakeExe, string ninjaExe, string godotPlatform,
             string? androidNdkRoot, EmscriptenSdk? emscripten)
         {
             _toolchain = toolchain;
             _cmakeExe = cmakeExe;
+            _ninjaExe = ninjaExe;
             _godotPlatform = godotPlatform;
             _androidNdkRoot = androidNdkRoot;
             _emscripten = emscripten;
@@ -165,6 +169,8 @@ namespace GodotTools.Export
 
             LogLine($"toolchain: {toolchain.RootDir} ({toolchain.Source})");
             LogLine($"manifest:  {toolchain.DescribeManifest()}");
+            LogLine($"cmake:     {cmakeExe}");
+            LogLine($"ninja:     {ninjaExe}");
             GD.Print($"dn2cpp: using the toolchain at {toolchain.RootDir} ({toolchain.Source})");
             GD.Print($"dn2cpp: {toolchain.DescribeManifest()}");
             if (emscripten is not null)
@@ -297,11 +303,17 @@ namespace GodotTools.Export
                     "preset.");
             }
 
+            // Ahead of the tool search below, which asks the bundle for a cmake and
+            // a ninja before it falls back to PATH.
+            if (!Dn2CppToolchain.TryResolve(out Dn2CppToolchain? toolchain, out string toolchainError))
+                throw new NotSupportedException(toolchainError);
+
             var missingTools = new List<string>();
-            string? cmakeExe = OS.PathWhich("cmake");
+            string? cmakeExe = ResolveCMake(toolchain);
             if (cmakeExe is null)
                 missingTools.Add($"cmake ({RequiredCMakeMajor}.{RequiredCMakeMinor} or newer)");
-            if (OS.PathWhich("ninja") is null)
+            string? ninjaExe = ResolveNinja(toolchain);
+            if (ninjaExe is null)
                 missingTools.Add("ninja");
             // The C++ compiler this looks for is the HOST's, and which name that is
             // belongs to the host rather than to the export target: the configure
@@ -320,7 +332,8 @@ namespace GodotTools.Export
             // box carrying a complete emsdk and points its user at a Visual Studio
             // install the export would never touch.
             bool needsHostCxx = godotPlatform != OS.Platforms.Web && godotPlatform != OS.Platforms.Android;
-            if (needsHostCxx && HostCxxCompiler() is null)
+            bool missingHostCxx = needsHostCxx && HostCxxCompiler() is null;
+            if (missingHostCxx)
             {
                 missingTools.Add(OS.IsWindows ? "cl.exe or clang++"
                     : OS.IsMacOS ? "clang++ (Xcode Command Line Tools)"
@@ -338,37 +351,67 @@ namespace GodotTools.Export
 
             if (missingTools.Count > 0)
             {
-                // Three arms, not two, and the third is not hypothetical: a host that
-                // is neither Windows nor macOS reaches this backend for the two
-                // cross-compiled targets (Web, Android), which need cmake and ninja
-                // like every other target does. Told to run 'xcode-select --install'
-                // and 'brew install', a Linux user is being sent to a package manager
-                // their machine does not have.
-                string remedy = OS.IsWindows
-                    // The Windows counterpart of the Finder-PATH trap below, and a
-                    // sharper one: MSVC is not installed onto PATH at all. cl.exe
-                    // becomes visible only inside a shell that has run vcvarsall,
-                    // so an editor started from Explorer — or from an ordinary
-                    // terminal — cannot see a complete Visual Studio install.
-                    ? "Install the Visual Studio C++ workload plus cmake and ninja, then start the editor " +
-                      "from a Developer Command Prompt (or any shell that has run vcvarsall): cl.exe is not " +
-                      "on PATH otherwise, however complete the install is."
-                    : OS.IsMacOS
-                        ? "Install it with 'xcode-select --install' and 'brew install cmake ninja', then restart " +
-                          "the editor. An editor launched from Finder inherits a minimal PATH, so Homebrew tools " +
-                          "can be invisible to it even when a terminal finds them."
-                        : "Install it with your distribution's package manager (e.g. 'apt install clang cmake " +
-                          "ninja-build'), then restart the editor from a shell that has the tools on PATH.";
+                // One remedy per miss, because the misses do not coincide: a Web or
+                // an Android export needs no host compiler at all, so a cmake-only
+                // miss there must not send its user to Visual Studio for a compiler
+                // that export would never invoke.
+                var remedy = new StringBuilder();
+
+                if (cmakeExe is null || ninjaExe is null)
+                {
+                    // Three arms, not two, and the third is not hypothetical: a host
+                    // that is neither Windows nor macOS reaches this backend for the
+                    // two cross-compiled targets (Web, Android), which need cmake and
+                    // ninja like every other target does. Told to 'brew install', a
+                    // Linux user is being sent to a package manager their machine does
+                    // not have.
+                    remedy.Append(OS.IsWindows
+                        ? "Install cmake and ninja (e.g. 'winget install Kitware.CMake Ninja-build.Ninja'), then " +
+                          "restart the editor from a shell that has them on PATH."
+                        : OS.IsMacOS
+                            ? "Install them with 'brew install cmake ninja', then restart the editor. An editor " +
+                              "launched from Finder inherits a minimal PATH, so Homebrew tools can be invisible " +
+                              "to it even when a terminal finds them."
+                            : "Install them with your distribution's package manager (e.g. 'apt install cmake " +
+                              "ninja-build'), then restart the editor from a shell that has them on PATH.");
+                    remedy.Append(CultureInfo.InvariantCulture,
+                        $"\nA toolchain bundle packaged with build tools carries its own pair and needs none of " +
+                        $"that; the editor settings '{Dn2CppToolchain.CMakePathSetting}' and " +
+                        $"'{Dn2CppToolchain.NinjaPathSetting}' name the two executables directly.");
+                }
+
+                if (missingHostCxx)
+                {
+                    if (remedy.Length > 0)
+                        remedy.Append('\n');
+
+                    remedy.Append(OS.IsWindows
+                        // The Windows counterpart of the Finder-PATH trap above, and a
+                        // sharper one: MSVC is not installed onto PATH at all. cl.exe
+                        // becomes visible only inside a shell that has run vcvarsall,
+                        // so an editor started from Explorer — or from an ordinary
+                        // terminal — cannot see a complete Visual Studio install.
+                        ? "Install the Visual Studio C++ workload, then start the editor from a Developer " +
+                          "Command Prompt (or any shell that has run vcvarsall): cl.exe is not on PATH " +
+                          "otherwise, however complete the install is."
+                        : OS.IsMacOS
+                            ? "Install the C++ compiler with 'xcode-select --install', then restart the editor."
+                            : "Install a C++ compiler with your distribution's package manager (e.g. 'apt " +
+                              "install clang'), then restart the editor from a shell that has it on PATH.");
+                }
 
                 if (needsNode)
                 {
-                    remedy += "\nThe bundled toolchain intentionally does not carry node; install Node.js 18 or " +
+                    if (remedy.Length > 0)
+                        remedy.Append('\n');
+
+                    remedy.Append("The bundled toolchain intentionally does not carry node; install Node.js 18 or " +
                         "newer (e.g. 'brew install node', 'apt install nodejs', or nodejs.org) and restart the " +
-                        "editor.";
+                        "editor.");
                 }
 
                 throw new NotSupportedException(
-                    "The dn2cpp export backend needs a C++ toolchain that is not on PATH: " +
+                    "The dn2cpp export backend is missing tools it cannot build without: " +
                     $"{string.Join(", ", missingTools)}.\n" + remedy);
             }
 
@@ -386,13 +429,10 @@ namespace GodotTools.Export
             if (godotPlatform == OS.Platforms.Web)
                 VerifyCMakeCanBuildWasmSharedLibs(cmakeExe!, cmakeVersion);
 
-            if (!Dn2CppToolchain.TryResolve(out Dn2CppToolchain? toolchain, out string toolchainError))
-                throw new NotSupportedException(toolchainError);
-
-            // Resolved here, for the same reason: an absent NDK is a refusal
-            // before the publish, not a cmake error twenty minutes in. The
-            // Emscripten SDK is asked of the bundle first, so the toolchain has to
-            // be resolved before it.
+            // Resolved before the publish for the refusals' sake: an absent NDK is
+            // a refusal now, not a cmake error twenty minutes in. The Emscripten SDK
+            // is asked of the bundle first, so the toolchain has to be resolved
+            // before it.
             string? androidNdkRoot = godotPlatform == OS.Platforms.Android ? ResolveAndroidNdk() : null;
             EmscriptenSdk? emscripten = godotPlatform == OS.Platforms.Web ? ResolveEmscripten(toolchain) : null;
 
@@ -416,7 +456,7 @@ namespace GodotTools.Export
                     "none is installed.");
             }
 
-            return new Dn2CppExporter(toolchain, cmakeExe!, godotPlatform, androidNdkRoot, emscripten);
+            return new Dn2CppExporter(toolchain, cmakeExe!, ninjaExe!, godotPlatform, androidNdkRoot, emscripten);
         }
 
         /// <summary>
@@ -529,7 +569,7 @@ namespace GodotTools.Export
             // persistent cache was configured from is not part of it. So the cache
             // has to be asked whether it still describes this toolchain before the
             // configure trusts it.
-            ResetStaleBuildCache(buildDir, _toolchain.RuntimeDir, slot);
+            ResetStaleBuildCache(buildDir, slot);
             // No CMAKE_BUILD_TYPE: runtime/CMakeLists.txt pins its own -O2 per
             // target, so a build type would only add -g (Debug) or -DNDEBUG
             // (Release) on top, and NDEBUG would silently disable the runtime's
@@ -549,6 +589,11 @@ namespace GodotTools.Export
                 "-S", _toolchain.RuntimeDir,
                 "-B", buildDir,
                 "-G", "Ninja",
+                // The generator would find a ninja on PATH, which is where a bundled
+                // one is not. A -D rather than an injected PATH because the cache
+                // records it, and ResetStaleBuildCache reads it back — typed, or the
+                // entry lands as UNINITIALIZED where cmake's own is a FILEPATH.
+                $"-DCMAKE_MAKE_PROGRAM:FILEPATH={CMakePath(_ninjaExe)}",
                 "-DDN2CPP_DOTNET_MODULE=ON",
                 $"-DDN2CPP_APP_DIR={CMakePath(genDir)}",
                 $"-DDN2CPP_APP_NAME={targetName}",
@@ -1099,6 +1144,62 @@ namespace GodotTools.Export
         };
 
         /// <summary>
+        /// Resolves the cmake the build configures with: an editor setting naming
+        /// one, else the bundle's own, else PATH — <see cref="ResolveEmscripten"/>'s
+        /// three arms, and the bundle outranks PATH for its reason. Null means the
+        /// PATH arm found nothing, which is the only arm that can come up empty.
+        /// </summary>
+        private static string? ResolveCMake(Dn2CppToolchain toolchain) =>
+            ResolveBuildTool("cmake", Dn2CppToolchain.CMakePathSetting,
+                toolchain.HasBuildTools ? toolchain.BundledCMake : null);
+
+        /// <summary>
+        /// Resolves ninja, <see cref="ResolveCMake"/>'s twin. Until the build
+        /// program was passed by path this was a mere probe — cmake found ninja
+        /// itself, from PATH, which is exactly what a bundled ninja is not on.
+        /// </summary>
+        private static string? ResolveNinja(Dn2CppToolchain toolchain) =>
+            ResolveBuildTool("ninja", Dn2CppToolchain.NinjaPathSetting,
+                toolchain.HasBuildTools ? toolchain.BundledNinja : null);
+
+        private static string? ResolveBuildTool(string tool, string setting, string? bundled)
+        {
+            string overridePath = Dn2CppToolchain.GetEditorSetting(setting);
+            if (overridePath.Length > 0)
+            {
+                string exe = Path.GetFullPath(overridePath);
+                if (!File.Exists(exe))
+                {
+                    throw new NotSupportedException(
+                        $"The editor setting '{setting}' points at '{exe}', which does not exist.\n" +
+                        $"Point it at a {tool} executable, or clear it to use the bundled {tool} — else the one " +
+                        "on PATH.");
+                }
+
+                return Resolved(tool, exe, $"editor setting '{setting}'");
+            }
+
+            if (bundled is not null)
+                return Resolved(tool, bundled, "bundled");
+
+            string? onPath = OS.PathWhich(tool);
+
+            return onPath is null ? null : Resolved(tool, onPath, "PATH");
+        }
+
+        /// <summary>
+        /// Names the arm that answered, for the reason the Emscripten origin is
+        /// printed: three arms mean the tool that ran is not the tool a reader of
+        /// the log would assume, and a failing build is diagnosed from this line.
+        /// </summary>
+        private static string Resolved(string tool, string exe, string origin)
+        {
+            GD.Print($"dn2cpp: {tool} {exe} ({origin})");
+
+            return exe;
+        }
+
+        /// <summary>
         /// Resolves the SDK the Web build compiles through: an editor setting
         /// naming one, else the bundle's own, else PATH. The bundle outranks PATH
         /// because it is the SDK this editor's runtime was packaged against, and
@@ -1590,7 +1691,8 @@ namespace GodotTools.Export
 
         /// <summary>
         /// Discard a persistent build directory whose CMake cache was configured
-        /// from a different source tree than the toolchain now offers.
+        /// from a different source tree, or by a different pair of build tools, than
+        /// this export is about to drive.
         /// </summary>
         /// <remarks>
         /// <para>A CMake cache records the source directory it was configured from,
@@ -1614,38 +1716,60 @@ namespace GodotTools.Export
         /// what cmake itself is going to compare against, so there is no second
         /// notion of "same tree" to keep in agreement.</para>
         /// </remarks>
-        private static void ResetStaleBuildCache(string buildDir, string runtimeDir, string slot)
+        private void ResetStaleBuildCache(string buildDir, string slot)
         {
-            const string HomeDirectoryKey = "CMAKE_HOME_DIRECTORY:INTERNAL=";
-
             string cacheFile = Path.Combine(buildDir, "CMakeCache.txt");
             if (!File.Exists(cacheFile))
                 return;
 
-            string? cachedHome = null;
+            // The build dir persists across exports, so the tool that wrote it is
+            // not necessarily the tool about to run — a flipped editor setting is
+            // enough. Discard it when it is not.
+            (string Name, string Expected, string What)[] pinned =
+            {
+                ("CMAKE_HOME_DIRECTORY", _toolchain.RuntimeDir, "runtime sources"),
+                ("CMAKE_COMMAND", _cmakeExe, "cmake"),
+                ("CMAKE_MAKE_PROGRAM", _ninjaExe, "build program"),
+            };
+
+            var cached = new string?[pinned.Length];
             foreach (string line in File.ReadLines(cacheFile))
             {
-                if (line.StartsWith(HomeDirectoryKey, StringComparison.Ordinal))
+                // NAME:TYPE=VALUE, matched on the NAME alone: an entry's type is
+                // whatever wrote it — the generator's FILEPATH, or the type a -D
+                // spelled — and none of that decides which tool the cache names.
+                int colon = line.IndexOf(':');
+                int equals = colon < 0 ? -1 : line.IndexOf('=', colon);
+                if (equals < 0)
+                    continue;
+
+                string name = line.Substring(0, colon);
+                for (int i = 0; i < pinned.Length; i++)
                 {
-                    cachedHome = line.Substring(HomeDirectoryKey.Length).Trim();
-                    break;
+                    if (cached[i] is null && name == pinned[i].Name)
+                        cached[i] = line.Substring(equals + 1).Trim();
                 }
             }
 
-            // A cache with no such entry is one cmake never finished writing (an
-            // interrupted or failed first configure). It is not "current", and the
-            // configure that follows would fail on it, so it goes too.
-            if (cachedHome is not null && SameDirectory(cachedHome, runtimeDir))
-                return;
+            for (int i = 0; i < pinned.Length; i++)
+            {
+                // A cache missing one of these is one cmake never finished writing
+                // (an interrupted or failed first configure). It is not "current",
+                // and the configure that follows would fail on it, so it goes too.
+                if (cached[i] is { } value && SamePath(value, pinned[i].Expected))
+                    continue;
 
-            GD.Print($"dn2cpp: stale build cache reset ({slot}): its CMakeCache.txt was configured " +
-                $"from '{cachedHome ?? "<no CMAKE_HOME_DIRECTORY>"}', but this toolchain's runtime " +
-                $"sources are at '{runtimeDir}' — recreating {buildDir}");
-            RecreateDirectory(buildDir);
+                GD.Print($"dn2cpp: stale build cache reset ({slot}): its CMakeCache.txt names " +
+                    $"'{cached[i] ?? "<nothing>"}' as the {pinned[i].What}, but this export uses " +
+                    $"'{pinned[i].Expected}' — recreating {buildDir}");
+                RecreateDirectory(buildDir);
+
+                return;
+            }
         }
 
         /// <summary>
-        /// Whether two directory paths name one directory, as far as a CMake cache
+        /// Whether two paths name one file or directory, as far as a CMake cache
         /// value and a path this process built can be compared.
         /// </summary>
         /// <remarks>
@@ -1658,7 +1782,7 @@ namespace GodotTools.Export
         /// reports a stale cache on every export and recompiles the runtime each
         /// time, which is the opposite failure and a silent one.
         /// </remarks>
-        private static bool SameDirectory(string a, string b)
+        private static bool SamePath(string a, string b)
         {
             static string Normalize(string path) => CMakePath(path).TrimEnd('/');
 
