@@ -34,6 +34,12 @@ namespace GodotTools.Export
         private const int RequiredCMakeMinor = 20;
 
         /// <summary>
+        /// The floor emcc.py asserts on the interpreter its launcher starts.
+        /// </summary>
+        private const int RequiredPythonMajor = 3;
+        private const int RequiredPythonMinor = 10;
+
+        /// <summary>
         /// The minimum iOS version the compiled library declares. 16.3 is the
         /// floor for float <c>std::to_chars</c> in libc++, which the bundled
         /// runtime's number formatting is built on.
@@ -435,6 +441,12 @@ namespace GodotTools.Export
             // before it.
             string? androidNdkRoot = godotPlatform == OS.Platforms.Android ? ResolveAndroidNdk() : null;
             EmscriptenSdk? emscripten = godotPlatform == OS.Platforms.Web ? ResolveEmscripten(toolchain) : null;
+
+            // Verified after resolution rather than listed among the missing tools
+            // above: which interpreter emcc starts is a property of the resolved
+            // SDK, and the usual miss is one that is present and too old.
+            if (emscripten is not null)
+                VerifyEmscriptenPython(emscripten);
 
             // A cross-target export off a Windows host transpiles the POSIX-flavour
             // framework, not the bundle's host one (Dn2CppToolchain.NeedsCrossCoreLib
@@ -1313,6 +1325,112 @@ namespace GodotTools.Export
             {
                 return "unknown version";
             }
+        }
+
+        /// <summary>
+        /// The interpreter emcc will start, and the arm that answered. Mirrors the
+        /// launchers exactly — EMSDK_PYTHON first, then <c>python3</c> and
+        /// <c>python</c> from the sh script, or <c>python.exe</c> alone from
+        /// pylauncher.exe. Probing a name emcc does not look for would be a check
+        /// that passes while the link fails.
+        /// </summary>
+        private static (string? Exe, string Origin) ResolveEmscriptenPython(EmscriptenSdk sdk)
+        {
+            // The overlay is the authority on EMSDK_PYTHON for an SDK that has one:
+            // it either names the staged interpreter or REMOVES an inherited one,
+            // and reading the process environment gets that wrong in both
+            // directions. A PATH SDK has no overlay and keeps what it inherited.
+            string? fromEnv = sdk.Env is not null
+                ? (sdk.Env.TryGetValue("EMSDK_PYTHON", out string? overlaid) ? overlaid : null)
+                : System.Environment.GetEnvironmentVariable("EMSDK_PYTHON");
+
+            if (!string.IsNullOrEmpty(fromEnv))
+                return (fromEnv, "EMSDK_PYTHON");
+
+            if (OS.IsWindows)
+                return (OS.PathWhich("python"), "PATH");
+
+            return (OS.PathWhich("python3") ?? OS.PathWhich("python"), "PATH");
+        }
+
+        /// <summary>
+        /// Verifies the python emcc runs on. Every Emscripten entry point is a
+        /// launcher over a python script whose first statement asserts the version,
+        /// and the SDK ships an interpreter on Windows alone — so everywhere else
+        /// emcc gets whatever the host happens to have, and a host with a too-old
+        /// one fails in the middle of the link instead of here.
+        /// </summary>
+        private static void VerifyEmscriptenPython(EmscriptenSdk sdk)
+        {
+            (string? exe, string origin) = ResolveEmscriptenPython(sdk);
+            string required = $"{RequiredPythonMajor}.{RequiredPythonMinor}";
+
+            if (exe is null)
+            {
+                throw new NotSupportedException(
+                    "The dn2cpp export backend compiles the game for the Web with Emscripten, whose emcc is a " +
+                    $"launcher over python {required} or newer — and there is none: " +
+                    $"{(OS.IsWindows ? "'python'" : "neither 'python3' nor 'python'")} is on PATH, and the " +
+                    $"Emscripten SDK in use ({sdk.Origin}) carries no interpreter of its own.\n" + PythonRemedy());
+            }
+
+            // Run it: presence is not the question. macOS answers 'python3' with an
+            // Xcode stub that reports 3.9.6, which emcc refuses.
+            string reported;
+            try
+            {
+                reported = CaptureToolOutput(exe, "-c",
+                    "import sys; print('%d.%d.%d' % sys.version_info[:3])").Trim();
+            }
+            catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException
+                                          or IOException)
+            {
+                reported = string.Empty;
+            }
+
+            if (!Version.TryParse(reported, out Version? version))
+            {
+                throw new NotSupportedException(
+                    $"Could not determine the version of the python emcc runs, '{exe}' ({origin}) — it reported: " +
+                    $"{reported}. The dn2cpp export backend needs python {required} or newer to export for the " +
+                    "Web.\n" + PythonRemedy());
+            }
+
+            if (version < new Version(RequiredPythonMajor, RequiredPythonMinor))
+            {
+                throw new NotSupportedException(
+                    $"The dn2cpp export backend compiles the game for the Web with Emscripten, whose emcc needs " +
+                    $"python {required} or newer, but the interpreter it would run — '{exe}' ({origin}) — is " +
+                    $"{version}.\n" + PythonRemedy());
+            }
+
+            // Printed for the reason the cmake and Emscripten origins are: three
+            // arms mean the interpreter that ran is not the one a reader would
+            // assume, and it is the only proof this check ran at all.
+            GD.Print($"dn2cpp: python {exe} ({version}, {origin})");
+        }
+
+        private static string PythonRemedy()
+        {
+            string required = $"{RequiredPythonMajor}.{RequiredPythonMinor}";
+
+            if (OS.IsMacOS)
+            {
+                // Worth spelling out: a user who "has python3" is being refused, and
+                // the thing they have is not a python — /usr/bin/python3 is the Xcode
+                // command-line stub, the same binary as /usr/bin/clang++, and it
+                // answers 3.9.6 forever.
+                return $"macOS ships no python of its own — '/usr/bin/python3' is an Xcode command-line stub " +
+                    "stuck at 3.9, and emcc will not run on it. Install a real one with 'brew install python3' " +
+                    "and restart the editor. An editor launched from Finder inherits a minimal PATH, so a " +
+                    "Homebrew python a terminal finds can be invisible to it.";
+            }
+
+            return OS.IsWindows
+                ? $"Install python {required} or newer (e.g. 'winget install Python.Python.3.12'), then restart " +
+                  "the editor from a shell that has it on PATH."
+                : $"Install python {required} or newer with your distribution's package manager (e.g. 'apt " +
+                  "install python3'), then restart the editor from a shell that has it on PATH.";
         }
 
         /// <summary>
