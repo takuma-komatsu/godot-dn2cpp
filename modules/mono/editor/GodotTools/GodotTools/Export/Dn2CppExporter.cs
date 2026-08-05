@@ -1379,7 +1379,7 @@ namespace GodotTools.Export
             string reported;
             try
             {
-                reported = CaptureToolOutput(exe, "-c",
+                reported = CaptureToolOutput(exe, "-E", "-c",
                     "import sys; print('%d.%d.%d' % sys.version_info[:3])").Trim();
             }
             catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException
@@ -1399,7 +1399,7 @@ namespace GodotTools.Export
             if (version < new Version(RequiredPythonMajor, RequiredPythonMinor))
             {
                 throw new NotSupportedException(
-                    $"The dn2cpp export backend compiles the game for the Web with Emscripten, whose emcc needs " +
+                    "The dn2cpp export backend compiles the game for the Web with Emscripten, whose emcc needs " +
                     $"python {required} or newer, but the interpreter it would run — '{exe}' ({origin}) — is " +
                     $"{version}.\n" + PythonRemedy());
             }
@@ -1420,7 +1420,7 @@ namespace GodotTools.Export
                 // the thing they have is not a python — /usr/bin/python3 is the Xcode
                 // command-line stub, the same binary as /usr/bin/clang++, and it
                 // answers 3.9.6 forever.
-                return $"macOS ships no python of its own — '/usr/bin/python3' is an Xcode command-line stub " +
+                return "macOS ships no python of its own — '/usr/bin/python3' is an Xcode command-line stub " +
                     "stuck at 3.9, and emcc will not run on it. Install a real one with 'brew install python3' " +
                     "and restart the editor. An editor launched from Finder inherits a minimal PATH, so a " +
                     "Homebrew python a terminal finds can be invisible to it.";
