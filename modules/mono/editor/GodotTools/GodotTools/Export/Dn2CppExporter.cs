@@ -117,6 +117,13 @@ namespace GodotTools.Export
         private readonly string _godotPlatform;
         private readonly string? _androidNdkRoot;
         private readonly EmscriptenSdk? _emscripten;
+        private readonly Dn2CppMsvcEnvironment? _msvc;
+
+        /// <summary>
+        /// The environment overlay every tool this export runs is given, a null
+        /// VALUE meaning "remove"; null when there is nothing to overlay.
+        /// </summary>
+        private readonly Dictionary<string, string?>? _toolEnv;
         private readonly string _logPath;
         private readonly StreamWriter _log;
         private readonly Queue<string> _logTail = new Queue<string>();
@@ -157,7 +164,7 @@ namespace GodotTools.Export
         private bool _workDirPruned;
 
         private Dn2CppExporter(Dn2CppToolchain toolchain, string cmakeExe, string ninjaExe, string godotPlatform,
-            string? androidNdkRoot, EmscriptenSdk? emscripten)
+            string? androidNdkRoot, EmscriptenSdk? emscripten, Dn2CppMsvcEnvironment? msvc)
         {
             _toolchain = toolchain;
             _cmakeExe = cmakeExe;
@@ -165,6 +172,8 @@ namespace GodotTools.Export
             _godotPlatform = godotPlatform;
             _androidNdkRoot = androidNdkRoot;
             _emscripten = emscripten;
+            _msvc = msvc;
+            _toolEnv = emscripten?.Env ?? msvc?.Env;
 
             string timestamp = DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
             string logsDir = Path.Combine(GodotSharpDirs.ProjectBaseOutputPath, "dn2cpp", "logs");
@@ -183,6 +192,12 @@ namespace GodotTools.Export
             {
                 LogLine($"emscripten: {emscripten.Version} ({emscripten.Origin})");
                 GD.Print($"dn2cpp: emscripten {emscripten.Version} ({emscripten.Origin})");
+            }
+
+            if (msvc is not null)
+            {
+                LogLine($"msvc:      {msvc.Origin}");
+                GD.Print($"dn2cpp: msvc {msvc.Origin}");
             }
             GD.Print($"dn2cpp: export log: {_logPath}");
         }
@@ -333,12 +348,26 @@ namespace GodotTools.Export
             // Nor does either need a host compiler to EXIST. Emscripten and the NDK
             // each hand cmake a toolchain file naming their own, so no host compiler
             // is invoked anywhere in those two builds — and on Windows, demanding one
-            // regardless is not a harmless extra check: MSVC is reachable only from a
-            // shell that has run vcvarsall, so the demand refuses a Web export on a
-            // box carrying a complete emsdk and points its user at a Visual Studio
-            // install the export would never touch.
+            // regardless is not a harmless extra check: MSVC is not on PATH, so the
+            // demand refuses a Web export on a box carrying a complete emsdk and
+            // points its user at a Visual Studio install the export would never
+            // touch. The import below is gated on the same question for that reason.
             bool needsHostCxx = godotPlatform != OS.Platforms.Web && godotPlatform != OS.Platforms.Android;
-            bool missingHostCxx = needsHostCxx && HostCxxCompiler() is null;
+
+            // A complete Visual Studio install is invisible until vcvarsall has run,
+            // so the editor runs it rather than demanding it was launched from a
+            // Developer Command Prompt. Skipped when the environment already carries
+            // one: that build works, and replacing its toolset is not this code's
+            // call.
+            Dn2CppMsvcEnvironment? msvc = null;
+            string? msvcFailure = null;
+            if (needsHostCxx && OS.IsWindows && !Dn2CppMsvcEnvironment.AlreadyInitialized())
+            {
+                GD.Print("dn2cpp: importing the Visual Studio C++ environment (this takes a few seconds)");
+                msvc = Dn2CppMsvcEnvironment.Import(out msvcFailure);
+            }
+
+            bool missingHostCxx = needsHostCxx && HostCxxCompiler(msvc) is null;
             if (missingHostCxx)
             {
                 missingTools.Add(OS.IsWindows ? "cl.exe or clang++"
@@ -393,13 +422,17 @@ namespace GodotTools.Export
 
                     remedy.Append(OS.IsWindows
                         // The Windows counterpart of the Finder-PATH trap above, and a
-                        // sharper one: MSVC is not installed onto PATH at all. cl.exe
-                        // becomes visible only inside a shell that has run vcvarsall,
-                        // so an editor started from Explorer — or from an ordinary
-                        // terminal — cannot see a complete Visual Studio install.
-                        ? "Install the Visual Studio C++ workload, then start the editor from a Developer " +
-                          "Command Prompt (or any shell that has run vcvarsall): cl.exe is not on PATH " +
-                          "otherwise, however complete the install is."
+                        // sharper one: MSVC is not installed onto PATH at all. So the
+                        // miss here is not "no compiler" but "no install the editor's
+                        // own search reached", and naming the search's failure is what
+                        // separates a machine without Visual Studio from one that put
+                        // it somewhere the search does not look.
+                        ? "Install the Visual Studio C++ workload (the standalone Build Tools carry it too), " +
+                          "then restart the editor. cl.exe is never on PATH, however complete the install is, " +
+                          "so the editor finds one through 'Microsoft Visual Studio\\Installer\\vswhere.exe' " +
+                          "under %ProgramFiles(x86)% and runs vcvarsall itself — a Developer Command Prompt is " +
+                          "not needed. That search found nothing here: " + msvcFailure + ". An install it " +
+                          "cannot reach is still served by starting the editor from a Developer Command Prompt."
                         : OS.IsMacOS
                             ? "Install the C++ compiler with 'xcode-select --install', then restart the editor."
                             : "Install a C++ compiler with your distribution's package manager (e.g. 'apt " +
@@ -468,7 +501,8 @@ namespace GodotTools.Export
                     "none is installed.");
             }
 
-            return new Dn2CppExporter(toolchain, cmakeExe!, ninjaExe!, godotPlatform, androidNdkRoot, emscripten);
+            return new Dn2CppExporter(toolchain, cmakeExe!, ninjaExe!, godotPlatform, androidNdkRoot, emscripten,
+                msvc);
         }
 
         /// <summary>
@@ -1046,10 +1080,13 @@ namespace GodotTools.Export
         /// one cmake WOULD have chosen turns an actionable refusal into a configure
         /// error many minutes into the export.
         /// </summary>
-        private static string? HostCxxCompiler()
+        private static string? HostCxxCompiler(Dn2CppMsvcEnvironment? msvc)
         {
+            // The imported cl was found on the PATH the overlay installs, which is
+            // the PATH the configure runs under; OS.PathWhich can only see this
+            // process's, and the editor's own environment is deliberately untouched.
             if (OS.IsWindows)
-                return OS.PathWhich("cl") ?? OS.PathWhich("clang++");
+                return msvc?.ClExe ?? OS.PathWhich("cl") ?? OS.PathWhich("clang++");
 
             // clang++ first because it is cmake's own first choice and the only
             // compiler a macOS host has; g++ after it because on Linux it is the
@@ -1612,13 +1649,15 @@ namespace GodotTools.Export
             foreach (string arg in args)
                 process.StartInfo.ArgumentList.Add(arg);
 
-            // Applied to every step, not to the configure alone: the build runs
-            // cmake, cmake runs ninja and ninja runs emcc, and it is emcc that
-            // reads EM_CONFIG — an environment set for the configure only would
-            // configure with the bundled SDK and compile with somebody else's.
-            if (_emscripten?.Env is { } emsdkEnv)
+            // Applied to every step, not to the configure alone: cmake runs ninja
+            // and ninja runs the compiler, and it is emcc that reads EM_CONFIG,
+            // cl.exe that reads INCLUDE and link.exe that reads LIB — cmake bakes
+            // none of them into the Ninja files. One overlay serves both because
+            // they exclude each other: emsdk is Web's, MSVC every target but Web
+            // and Android.
+            if (_toolEnv is { } toolEnv)
             {
-                foreach ((string name, string? value) in emsdkEnv)
+                foreach ((string name, string? value) in toolEnv)
                 {
                     if (value is null)
                         process.StartInfo.Environment.Remove(name);
@@ -1843,14 +1882,22 @@ namespace GodotTools.Export
             // The build dir persists across exports, so the tool that wrote it is
             // not necessarily the tool about to run — a flipped editor setting is
             // enough. Discard it when it is not.
-            (string Name, string Expected, string What)[] pinned =
+            var pinned = new List<(string Name, string Expected, string What)>
             {
                 ("CMAKE_HOME_DIRECTORY", _toolchain.RuntimeDir, "runtime sources"),
                 ("CMAKE_COMMAND", _cmakeExe, "cmake"),
                 ("CMAKE_MAKE_PROGRAM", _ninjaExe, "build program"),
             };
 
-            var cached = new string?[pinned.Length];
+            // cmake never re-detects a compiler it has cached, so a tree configured
+            // by another toolset would take this import's INCLUDE and LIB. Asked
+            // only when the import ran: elsewhere the cached compiler is one cmake
+            // chose for itself (/usr/bin/c++ where the probe found clang++), and an
+            // unconditional test would recompile the whole runtime every export.
+            if (_msvc is not null)
+                pinned.Add(("CMAKE_CXX_COMPILER", _msvc.ClExe, "C++ compiler"));
+
+            var cached = new string?[pinned.Count];
             foreach (string line in File.ReadLines(cacheFile))
             {
                 // NAME:TYPE=VALUE, matched on the NAME alone: an entry's type is
@@ -1862,14 +1909,14 @@ namespace GodotTools.Export
                     continue;
 
                 string name = line.Substring(0, colon);
-                for (int i = 0; i < pinned.Length; i++)
+                for (int i = 0; i < pinned.Count; i++)
                 {
                     if (cached[i] is null && name == pinned[i].Name)
                         cached[i] = line.Substring(equals + 1).Trim();
                 }
             }
 
-            for (int i = 0; i < pinned.Length; i++)
+            for (int i = 0; i < pinned.Count; i++)
             {
                 // A cache missing one of these is one cmake never finished writing
                 // (an interrupted or failed first configure). It is not "current",
