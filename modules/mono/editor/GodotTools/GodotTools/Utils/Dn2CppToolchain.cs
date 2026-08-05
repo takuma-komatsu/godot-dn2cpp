@@ -37,6 +37,18 @@ namespace GodotTools.Utils
         /// </summary>
         public const string EmsdkCachePathSetting = "dotnet/export/dn2cpp_emsdk_cache_path";
 
+        /// <summary>
+        /// Editor settings naming the cmake and the ninja to build with, ahead of
+        /// the bundled pair and of PATH. Each names an EXECUTABLE, where
+        /// <see cref="EmsdkPathSetting"/> names a layout: an emsdk is a tree with a
+        /// config to point at, while these two are single binaries, and a path to a
+        /// binary is what a user of them has.
+        /// </summary>
+        public const string CMakePathSetting = "dotnet/export/dn2cpp_cmake_path";
+
+        /// <inheritdoc cref="CMakePathSetting"/>
+        public const string NinjaPathSetting = "dotnet/export/dn2cpp_ninja_path";
+
         private Dn2CppToolchain(string rootDir, string source)
         {
             RootDir = rootDir;
@@ -178,6 +190,50 @@ namespace GodotTools.Utils
             System.IO.File.Exists(EmsdkEmcmakeIn(emsdkDir))
             && System.IO.File.Exists(EmsdkConfigIn(emsdkDir));
 
+        /// <summary>
+        /// The cmake and ninja the native build runs. Like the Emscripten SDK, only
+        /// a bundle packaged with them carries a pair, so its absence is normal and
+        /// never a broken layout — see <see cref="TryValidate"/>.
+        /// </summary>
+        public string BuildToolsDir => Path.Combine(RootDir, "buildtools");
+
+        /// <inheritdoc cref="BuildToolsDir"/>
+        public string BundledCMake => CMakeIn(BuildToolsDir);
+
+        /// <inheritdoc cref="BuildToolsDir"/>
+        public string BundledNinja => NinjaIn(BuildToolsDir);
+
+        /// <summary>Whether this bundle carries a usable cmake and ninja.</summary>
+        public bool HasBuildTools => IsBuildToolsLayout(BuildToolsDir);
+
+        /// <summary>cmake under an arbitrary build-tools root.</summary>
+        public static string CMakeIn(string buildToolsDir) =>
+            Path.Combine(buildToolsDir, "cmake", "bin", OS.IsWindows ? "cmake.exe" : "cmake");
+
+        /// <summary>ninja under an arbitrary build-tools root.</summary>
+        public static string NinjaIn(string buildToolsDir) =>
+            Path.Combine(buildToolsDir, "ninja", OS.IsWindows ? "ninja.exe" : "ninja");
+
+        /// <summary>
+        /// Whether <paramref name="buildToolsDir"/> holds a pair this backend can
+        /// drive.
+        /// </summary>
+        public static bool IsBuildToolsLayout(string buildToolsDir)
+        {
+            // The module tree as well as the binary: a cmake with no CMAKE_ROOT resolves,
+            // runs, and dies in the first project() naming a file rather than a toolchain.
+            string share = Path.Combine(buildToolsDir, "cmake", "share");
+
+            return System.IO.File.Exists(CMakeIn(buildToolsDir))
+                && System.IO.File.Exists(NinjaIn(buildToolsDir))
+                && System.IO.Directory.Exists(share)
+                // The version component of 'cmake-<M>.<m>/Modules' belongs to the
+                // cmake that was packaged, so the tree is searched rather than
+                // spelled. This is the file cmake itself accepts a CMAKE_ROOT by.
+                && System.IO.Directory.GetFiles(share, "CMakeSystemSpecificInformation.cmake",
+                    SearchOption.AllDirectories).Length > 0;
+        }
+
         /// <summary>The dn2cpp-to-fork version contract: commit, package version, godot pin, content hash.</summary>
         public string ManifestPath => Path.Combine(RootDir, "manifest.json");
 
@@ -240,9 +296,10 @@ namespace GodotTools.Utils
 
         private bool TryValidate(out string error)
         {
-            // The Emscripten SDK is deliberately not required here: only a Web
-            // export needs one, and demanding it would refuse every other target
-            // on a bundle packaged where no SDK was.
+            // Neither the Emscripten SDK nor the cmake/ninja pair is required here:
+            // only a Web export needs an SDK, and a bundle carrying no build tools
+            // still serves every target through the host's own — demanding either
+            // would refuse a bundle that works.
             foreach (string required in new[]
                      { Dn2CppExe, RuntimeShim, CoreLibRef, Path.Combine(RuntimeDir, "CMakeLists.txt") })
             {
