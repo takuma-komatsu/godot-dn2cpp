@@ -297,6 +297,11 @@ namespace GodotTools.Export
                     "preset.");
             }
 
+            // Ahead of the tool search below, which asks the bundle for a cmake and
+            // a ninja before it falls back to PATH.
+            if (!Dn2CppToolchain.TryResolve(out Dn2CppToolchain? toolchain, out string toolchainError))
+                throw new NotSupportedException(toolchainError);
+
             var missingTools = new List<string>();
             string? cmakeExe = OS.PathWhich("cmake");
             if (cmakeExe is null)
@@ -386,13 +391,10 @@ namespace GodotTools.Export
             if (godotPlatform == OS.Platforms.Web)
                 VerifyCMakeCanBuildWasmSharedLibs(cmakeExe!, cmakeVersion);
 
-            if (!Dn2CppToolchain.TryResolve(out Dn2CppToolchain? toolchain, out string toolchainError))
-                throw new NotSupportedException(toolchainError);
-
-            // Resolved here, for the same reason: an absent NDK is a refusal
-            // before the publish, not a cmake error twenty minutes in. The
-            // Emscripten SDK is asked of the bundle first, so the toolchain has to
-            // be resolved before it.
+            // Resolved before the publish for the refusals' sake: an absent NDK is
+            // a refusal now, not a cmake error twenty minutes in. The Emscripten SDK
+            // is asked of the bundle first, so the toolchain has to be resolved
+            // before it.
             string? androidNdkRoot = godotPlatform == OS.Platforms.Android ? ResolveAndroidNdk() : null;
             EmscriptenSdk? emscripten = godotPlatform == OS.Platforms.Web ? ResolveEmscripten(toolchain) : null;
 
