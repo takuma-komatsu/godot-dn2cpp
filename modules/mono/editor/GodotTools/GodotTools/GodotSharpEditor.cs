@@ -37,6 +37,8 @@ namespace GodotTools
             public const string Dn2CppToolchainPath = Dn2CppToolchain.ToolchainPathSetting;
             public const string Dn2CppEmsdkPath = Dn2CppToolchain.EmsdkPathSetting;
             public const string Dn2CppEmsdkCachePath = Dn2CppToolchain.EmsdkCachePathSetting;
+            public const string Dn2CppCMakePath = Dn2CppToolchain.CMakePathSetting;
+            public const string Dn2CppNinjaPath = Dn2CppToolchain.NinjaPathSetting;
         }
 
 #nullable disable
@@ -566,6 +568,9 @@ namespace GodotTools
             EditorDef(Settings.Dn2CppEmsdkPath, "");
             // Empty means "use the bundled SDK's own frozen cache".
             EditorDef(Settings.Dn2CppEmsdkCachePath, "");
+            // Empty means "use the build tools in that toolchain, else PATH".
+            EditorDef(Settings.Dn2CppCMakePath, "");
+            EditorDef(Settings.Dn2CppNinjaPath, "");
 
             string settingsHintStr = "Disabled";
 
@@ -654,6 +659,21 @@ namespace GodotTools
                 ["type"] = (int)Variant.Type.String,
                 ["name"] = Settings.Dn2CppEmsdkCachePath,
                 ["hint"] = (int)PropertyHint.GlobalDir,
+            });
+
+            // A file rather than a directory: these two name executables.
+            _editorSettings.AddPropertyInfo(new Godot.Collections.Dictionary
+            {
+                ["type"] = (int)Variant.Type.String,
+                ["name"] = Settings.Dn2CppCMakePath,
+                ["hint"] = (int)PropertyHint.GlobalFile,
+            });
+
+            _editorSettings.AddPropertyInfo(new Godot.Collections.Dictionary
+            {
+                ["type"] = (int)Variant.Type.String,
+                ["name"] = Settings.Dn2CppNinjaPath,
+                ["hint"] = (int)PropertyHint.GlobalFile,
             });
 
             OnSettingsChanged();
