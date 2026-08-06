@@ -181,6 +181,24 @@ namespace GodotTools.Utils
             Path.Combine(emsdkDir, "emscripten", ".emscripten");
 
         /// <summary>
+        /// The node emcc runs its JS tools on, under an arbitrary SDK root.
+        /// </summary>
+        public static string EmsdkNodeIn(string emsdkDir) =>
+            // The split is the upstream archive's own shape — nodejs.org puts the
+            // POSIX binary under bin/ and the Windows one at the tree root — not a
+            // difference of extension.
+            OS.IsWindows
+                ? Path.Combine(emsdkDir, "node", "node.exe")
+                : Path.Combine(emsdkDir, "node", "bin", "node");
+
+        /// <summary>Whether the SDK under <paramref name="emsdkDir"/> carries its own node.</summary>
+        public static bool HasEmsdkNode(string emsdkDir) =>
+            // Deliberately not part of IsEmsdkLayout: a plain 'emsdk install' tree
+            // carries no node and names the host's in its own config, which is a
+            // working SDK — demanding one here would refuse it.
+            System.IO.File.Exists(EmsdkNodeIn(emsdkDir));
+
+        /// <summary>
         /// Whether <paramref name="emsdkDir"/> is an SDK this backend can drive.
         /// The config is asked for as well as the wrapper: without one, emcc falls
         /// back to the user's <c>~/.emscripten</c> and compiles through another
