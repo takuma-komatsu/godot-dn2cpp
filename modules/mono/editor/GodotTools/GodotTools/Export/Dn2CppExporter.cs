@@ -40,6 +40,13 @@ namespace GodotTools.Export
         private const int RequiredPythonMinor = 10;
 
         /// <summary>
+        /// The floor emcc asserts on the node its JS tools run under. This is
+        /// emcc's own number and not the version a toolchain bundle pins: the fork
+        /// holds no bundle-specific number.
+        /// </summary>
+        private const int RequiredNodeMajor = 18;
+
+        /// <summary>
         /// The minimum iOS version the compiled library declares. 16.3 is the
         /// floor for float <c>std::to_chars</c> in libc++, which the bundled
         /// runtime's number formatting is built on.
@@ -375,14 +382,18 @@ namespace GodotTools.Export
                     : "clang++ or g++");
             }
 
-            // Emscripten's compiler driver and its wasm tools run on node, and the
-            // bundled SDK carries none: a pinned node is a second runtime to keep
-            // patched, and every machine that can build a game already has one to
-            // hand. Asked here so a Web export refuses before the publish rather
-            // than in the middle of the link.
-            bool needsNode = godotPlatform == OS.Platforms.Web && OS.PathWhich("node") is null;
+            // Emscripten's compiler driver and its wasm tools run on node. A
+            // toolchain bundle's SDK carries a pinned one, so the host only has to
+            // supply node for an SDK that does not — the question is asked of the
+            // SDK this export would use, never of the bundle as a whole. Asked here
+            // so a Web export refuses before the publish rather than in the middle
+            // of the link.
+            string? preflightEmsdkDir = godotPlatform == OS.Platforms.Web ? PreflightEmsdkDir(toolchain) : null;
+            bool needsNode = godotPlatform == OS.Platforms.Web
+                && !(preflightEmsdkDir is not null && Dn2CppToolchain.HasEmsdkNode(preflightEmsdkDir))
+                && OS.PathWhich("node") is null;
             if (needsNode)
-                missingTools.Add("node (Node.js 18 or newer)");
+                missingTools.Add($"node (Node.js {RequiredNodeMajor} or newer)");
 
             if (missingTools.Count > 0)
             {
@@ -444,9 +455,10 @@ namespace GodotTools.Export
                     if (remedy.Length > 0)
                         remedy.Append('\n');
 
-                    remedy.Append("The bundled toolchain intentionally does not carry node; install Node.js 18 or " +
-                        "newer (e.g. 'brew install node', 'apt install nodejs', or nodejs.org) and restart the " +
-                        "editor.");
+                    remedy.Append(CultureInfo.InvariantCulture,
+                        $"The Emscripten SDK this export would compile through carries no node of its own, so " +
+                        $"it is one on PATH or one the editor setting '{Dn2CppToolchain.EmsdkPathSetting}' " +
+                        $"names.\n{NodeRemedy()}");
                 }
 
                 throw new NotSupportedException(
@@ -476,10 +488,14 @@ namespace GodotTools.Export
             EmscriptenSdk? emscripten = godotPlatform == OS.Platforms.Web ? ResolveEmscripten(toolchain) : null;
 
             // Verified after resolution rather than listed among the missing tools
-            // above: which interpreter emcc starts is a property of the resolved
-            // SDK, and the usual miss is one that is present and too old.
+            // above: which interpreter and which node emcc starts are properties of
+            // the resolved SDK, and the usual miss is one that is present and too
+            // old.
             if (emscripten is not null)
+            {
                 VerifyEmscriptenPython(emscripten);
+                VerifyEmscriptenNode(emscripten);
+            }
 
             // A cross-target export off a Windows host transpiles the POSIX-flavour
             // framework, not the bundle's host one (Dn2CppToolchain.NeedsCrossCoreLib
@@ -1156,12 +1172,14 @@ namespace GodotTools.Export
         /// </summary>
         private sealed class EmscriptenSdk
         {
-            public EmscriptenSdk(string emcmakeExe, Dictionary<string, string?>? env, string origin, string version)
+            public EmscriptenSdk(string emcmakeExe, Dictionary<string, string?>? env, string origin, string version,
+                string? emsdkDir)
             {
                 EmcmakeExe = emcmakeExe;
                 Env = env;
                 Origin = origin;
                 Version = version;
+                EmsdkDir = emsdkDir;
             }
 
             public string EmcmakeExe { get; }
@@ -1176,6 +1194,12 @@ namespace GodotTools.Export
             public string Origin { get; }
 
             public string Version { get; }
+
+            /// <summary>
+            /// The SDK's root, or null for one taken from PATH — where this backend
+            /// found a frontend and knows nothing of the layout behind it.
+            /// </summary>
+            public string? EmsdkDir { get; }
         }
 
         /// <summary>
@@ -1189,7 +1213,7 @@ namespace GodotTools.Export
         private static readonly string[] ActivatedEmsdkVars =
         {
             "EM_CACHE", "EM_LLVM_ROOT", "EM_BINARYEN_ROOT", "EM_FROZEN_CACHE",
-            "EMSDK", "EMSDK_NODE", "EMSDK_PYTHON", "EMSCRIPTEN",
+            "EMSDK", "EMSDK_NODE", "EM_NODE_JS", "EMSDK_PYTHON", "EMSCRIPTEN",
         };
 
         /// <summary>
@@ -1246,6 +1270,24 @@ namespace GodotTools.Export
             GD.Print($"dn2cpp: {tool} {exe} ({origin})");
 
             return exe;
+        }
+
+        /// <summary>
+        /// The SDK root a Web export would use, as far as it is knowable before the
+        /// tool checks run: <see cref="ResolveEmscripten"/>'s first two arms, minus
+        /// their validation and their environment overlay. Null for the PATH arm,
+        /// whose root this backend never computes.
+        /// <para>Deliberately not <see cref="ResolveEmscripten"/> itself, which
+        /// verifies the python and builds the overlay: running it this early would
+        /// reorder the refusals the preflight exists to produce.</para>
+        /// </summary>
+        private static string? PreflightEmsdkDir(Dn2CppToolchain toolchain)
+        {
+            string overridePath = Dn2CppToolchain.GetEditorSetting(Dn2CppToolchain.EmsdkPathSetting);
+            if (overridePath.Length > 0)
+                return Path.GetFullPath(overridePath);
+
+            return toolchain.HasEmsdk ? toolchain.EmsdkDir : null;
         }
 
         /// <summary>
@@ -1308,7 +1350,7 @@ namespace GodotTools.Export
             // it is the environment that selected that SDK, and overwriting
             // EM_CONFIG or PATH under it would change a build that already works.
             return new EmscriptenSdk(emcmakeExe!, null, $"PATH: {emcmakeExe}",
-                ReadEmscriptenVersion(Path.GetDirectoryName(emcmakeExe!) ?? string.Empty));
+                ReadEmscriptenVersion(Path.GetDirectoryName(emcmakeExe!) ?? string.Empty), null);
         }
 
         private static EmscriptenSdk BundledEmscripten(string emsdkDir, string origin)
@@ -1321,6 +1363,10 @@ namespace GodotTools.Export
                 env[activated] = null;
 
             env["EM_CONFIG"] = Dn2CppToolchain.EmsdkConfigIn(emsdkDir);
+
+            // The SDK's own node is deliberately absent from this PATH: the config
+            // names it, and that is the single authority on which node emcc starts.
+            // On PATH it would reach the dotnet publish and the cmake children too.
             env["PATH"] = path.Length > 0 ? emscriptenDir + Path.PathSeparator + path : emscriptenDir;
 
             // Resolving the bundled python is the environment's job: the SDK's
@@ -1340,7 +1386,7 @@ namespace GodotTools.Export
             }
 
             return new EmscriptenSdk(Dn2CppToolchain.EmsdkEmcmakeIn(emsdkDir), env, origin,
-                ReadEmscriptenVersion(emscriptenDir));
+                ReadEmscriptenVersion(emscriptenDir), emsdkDir);
         }
 
         /// <summary>
@@ -1469,6 +1515,88 @@ namespace GodotTools.Export
                 : $"Install python {required} or newer with your distribution's package manager (e.g. 'apt " +
                   "install python3'), then restart the editor from a shell that has it on PATH.";
         }
+
+        /// <summary>
+        /// The node emcc will start, and the arm that answered. The SDK's own node
+        /// is COMPUTED from the layout rather than read out of <c>.emscripten</c>,
+        /// the flavour <see cref="ResolveEmscriptenPython"/> takes with
+        /// <c>EMSDK_PYTHON</c>.
+        /// </summary>
+        private static (string? Exe, string Origin) ResolveEmscriptenNode(EmscriptenSdk sdk)
+        {
+            // The overlay is the authority for an SDK that has one, exactly as it is
+            // for EMSDK_PYTHON: it either names a node or REMOVES an inherited one,
+            // and the process environment gets that wrong in both directions.
+            string? fromEnv = sdk.Env is not null
+                ? (sdk.Env.TryGetValue("EM_NODE_JS", out string? overlaid) ? overlaid : null)
+                : System.Environment.GetEnvironmentVariable("EM_NODE_JS");
+
+            if (!string.IsNullOrEmpty(fromEnv))
+                return (fromEnv, "EM_NODE_JS");
+
+            if (sdk.EmsdkDir is not null && Dn2CppToolchain.HasEmsdkNode(sdk.EmsdkDir))
+                return (Dn2CppToolchain.EmsdkNodeIn(sdk.EmsdkDir), "bundled");
+
+            return (OS.PathWhich("node"), "PATH");
+        }
+
+        /// <summary>
+        /// Verifies the node emcc runs its JS tools on. Every link starts one — the
+        /// driver shells out to compiler.mjs and to <c>node --check</c> — so a node
+        /// that is absent or too old fails in the middle of the link rather than
+        /// here.
+        /// </summary>
+        private static void VerifyEmscriptenNode(EmscriptenSdk sdk)
+        {
+            (string? exe, string origin) = ResolveEmscriptenNode(sdk);
+
+            if (exe is null)
+            {
+                throw new NotSupportedException(
+                    "The dn2cpp export backend compiles the game for the Web with Emscripten, whose every link " +
+                    $"runs node {RequiredNodeMajor} or newer — and there is none: 'node' is not on PATH, and the " +
+                    $"Emscripten SDK in use ({sdk.Origin}) carries none of its own.\n" + NodeRemedy());
+            }
+
+            // Run it: presence is not the question, and a distribution's 'node' can
+            // be years behind what emcc's JS asks of it.
+            string reported;
+            try
+            {
+                reported = CaptureToolOutput(exe, "--version").Trim().TrimStart('v');
+            }
+            catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException
+                                          or IOException)
+            {
+                reported = string.Empty;
+            }
+
+            if (!Version.TryParse(reported, out Version? version))
+            {
+                throw new NotSupportedException(
+                    $"Could not determine the version of the node emcc runs, '{exe}' ({origin}) — it reported: " +
+                    $"{reported}. The dn2cpp export backend needs node {RequiredNodeMajor} or newer to export " +
+                    "for the Web.\n" + NodeRemedy());
+            }
+
+            if (version.Major < RequiredNodeMajor)
+            {
+                throw new NotSupportedException(
+                    "The dn2cpp export backend compiles the game for the Web with Emscripten, whose links need " +
+                    $"node {RequiredNodeMajor} or newer, but the one they would run — '{exe}' ({origin}) — is " +
+                    $"{version}.\n" + NodeRemedy());
+            }
+
+            // Printed for the reason the python and cmake origins are: three arms
+            // mean the node that ran is not the one a reader would assume, and it is
+            // the only proof this check ran at all.
+            GD.Print($"dn2cpp: node {exe} ({version}, {origin})");
+        }
+
+        private static string NodeRemedy() =>
+            $"Install Node.js {RequiredNodeMajor} or newer (e.g. 'brew install node', 'apt install nodejs', or " +
+            "nodejs.org) and restart the editor. A toolchain bundle's Emscripten SDK carries a pinned node and " +
+            "needs none of that.";
 
         /// <summary>
         /// The assembly name, reduced to the character set CMake allows in a target
