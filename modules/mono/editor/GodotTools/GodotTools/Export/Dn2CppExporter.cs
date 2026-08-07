@@ -1462,7 +1462,10 @@ namespace GodotTools.Export
             string reported;
             try
             {
-                reported = CaptureToolOutput(exe, "-E", "-c",
+                // -X utf8 mirrors the launcher; -B is the only lever that stops the
+                // interpreter caching encodings .pyc into a bundle it may not write,
+                // as -E disables PYTHONDONTWRITEBYTECODE and site runs too late.
+                reported = CaptureToolOutput(exe, "-B", "-E", "-X", "utf8", "-c",
                     "import sys; print('%d.%d.%d' % sys.version_info[:3])").Trim();
             }
             catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException
