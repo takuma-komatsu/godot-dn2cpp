@@ -222,13 +222,15 @@ namespace GodotTools.Export
         /// </param>
         public static Dn2CppExporter Create(string godotPlatform, IReadOnlyCollection<string> archs)
         {
-            if (godotPlatform == OS.Platforms.MacOS || godotPlatform == OS.Platforms.Windows)
+            if (godotPlatform == OS.Platforms.MacOS || godotPlatform == OS.Platforms.Windows
+                || godotPlatform == OS.Platforms.LinuxBSD)
             {
-                // The two host-compiled desktop targets. The bundle compiles the
-                // game with the host's own C++ compiler (clang++ on macOS, cl.exe
-                // under the Ninja generator on Windows), so the export machine is
-                // the only machine it can target — neither its operating system nor
-                // its architecture may differ, and the checks are identical.
+                // The host-compiled desktop targets. The bundle compiles the game
+                // with the host's own C++ compiler (clang++ on macOS and Linux,
+                // cl.exe under the Ninja generator on Windows), so the export
+                // machine is the only machine it can target — neither its operating
+                // system nor its architecture may differ, and the checks are
+                // identical.
                 //
                 // The OS is asked FIRST, because the architecture test alone lets a
                 // foreign host straight through: a Linux x86_64 or an Intel macOS
@@ -239,10 +241,16 @@ namespace GodotTools.Export
                 // '<assembly>.dll'" that names no cause. Asking the OS first also
                 // makes the message the right one: a wrong-OS export is not a
                 // cross-architecture refusal.
-                if (godotPlatform == OS.Platforms.Windows ? !OS.IsWindows : !OS.IsMacOS)
-                {
-                    string targetName = godotPlatform == OS.Platforms.Windows ? "Windows" : "macOS";
+                //
+                // One pair per target rather than a ternary: a two-valued "Windows
+                // or else macOS" test silently answers macOS for a third target.
+                (bool hostIsTarget, string targetName) =
+                    godotPlatform == OS.Platforms.Windows ? (OS.IsWindows, "Windows")
+                    : godotPlatform == OS.Platforms.MacOS ? (OS.IsMacOS, "macOS")
+                    : (OS.IsLinuxBSD, "Linux");
 
+                if (!hostIsTarget)
+                {
                     throw new NotSupportedException(
                         "The dn2cpp export backend compiles the game with the host's own C++ compiler, so an " +
                         $"export to {targetName} has to run on {targetName}; this host is not one. Export from a " +
@@ -326,9 +334,9 @@ namespace GodotTools.Export
             else
             {
                 throw new NotSupportedException(
-                    $"The dn2cpp export backend supports Windows, macOS, iOS, Android and Web only for now, not " +
-                    $"'{godotPlatform}'. Switch 'dotnet/export_backend' to 'Host Runtime' or 'NativeAOT' for this " +
-                    "preset.");
+                    $"The dn2cpp export backend supports Windows, macOS, Linux, iOS, Android and Web only for now, " +
+                    $"not '{godotPlatform}'. Switch 'dotnet/export_backend' to 'Host Runtime' or 'NativeAOT' for " +
+                    "this preset.");
             }
 
             // Ahead of the tool search below, which asks the bundle for a cmake and
@@ -563,6 +571,10 @@ namespace GodotTools.Export
             // which is Windows's own: a SHARED target is <name>.dll with NO 'lib'
             // prefix, and the engine opens exactly <assembly>.dll.
             bool targetsWindows = _godotPlatform == OS.Platforms.Windows;
+            // Linux is named for the same reason: host-compiled like the other two
+            // desktops, but its SHARED target is lib<name>.so while the engine
+            // opens <assembly>.so.
+            bool targetsLinux = _godotPlatform == OS.Platforms.LinuxBSD;
             if (targetsWeb)
             {
                 if (arch != WebArch)
@@ -719,7 +731,7 @@ namespace GodotTools.Export
             RunTool(_cmakeExe, new List<string> { "--build", buildDir }, "compiling the drop-in library");
 
             return StageBuiltLibrary(buildDir, stageDir, targetName, assemblyName,
-                targetsWindows, targetsAndroid, targetsWeb);
+                targetsWindows, targetsLinux, targetsAndroid, targetsWeb);
         }
 
         /// <summary>
@@ -828,15 +840,17 @@ namespace GodotTools.Export
         /// its own, under the name the engine opens, and returns that directory.
         /// </summary>
         private string StageBuiltLibrary(string buildDir, string stageDir, string targetName,
-            string assemblyName, bool targetsWindows, bool targetsAndroid, bool targetsWeb)
+            string assemblyName, bool targetsWindows, bool targetsLinux, bool targetsAndroid,
+            bool targetsWeb)
         {
             // What CMake names a SHARED target's output is the platform's rule, not
-            // one convention, and the three Unix-family targets already needed three
-            // different answers. On Apple the linker writes lib<name>.dylib and the
-            // engine opens <name>.dylib — the name a NativeAOT publish produces — so
-            // the lib prefix is dropped when staging. On Android it opens the bare
-            // soname lib<name>.so and lets the linker find it in the APK's lib/<abi>/,
-            // so there the prefix is the whole point: keep it.
+            // one convention, and the Unix-family targets needed a different answer
+            // each. On Apple the linker writes lib<name>.dylib and the engine opens
+            // <name>.dylib — the name a NativeAOT publish produces — so the lib
+            // prefix is dropped when staging. Desktop Linux is that same rule with
+            // .so for the extension. On Android it opens the bare soname
+            // lib<name>.so and lets the linker find it in the APK's lib/<abi>/, so
+            // there the prefix is the whole point: keep it.
             //
             // On the Web the prefix goes, for a third reason. Emscripten names the
             // side module lib<name>.so like any other SHARED target, but the engine
@@ -847,7 +861,8 @@ namespace GodotTools.Export
             // of libraries it preloaded before main(), keyed on the file name the Web
             // exporter copied next to index.html. That is the staged file's name. So
             // the staged file must be exactly <assembly>.so: on this platform the
-            // name is not a convention, it is the entire lookup.
+            // name is not a convention, it is the entire lookup. Desktop Linux lands
+            // on the same staged name by taking that UNIX_ENABLED branch for real.
             //
             // Windows is the fourth, and the only one whose BUILT name is not decided
             // by the platform alone: the no-'lib'-prefix rule is the MSVC ABI's, not
@@ -875,7 +890,7 @@ namespace GodotTools.Export
             else
             {
                 builtLibrary = Path.Combine(buildDir,
-                    $"lib{targetName}.{(targetsAndroid || targetsWeb ? "so" : "dylib")}");
+                    $"lib{targetName}.{(targetsLinux || targetsAndroid || targetsWeb ? "so" : "dylib")}");
                 if (!File.Exists(builtLibrary))
                 {
                     throw new InvalidOperationException(
@@ -886,7 +901,7 @@ namespace GodotTools.Export
             RecreateDirectory(stageDir);
             string stagedName = targetsWindows ? $"{assemblyName}.dll"
                 : targetsAndroid ? $"lib{assemblyName}.so"
-                : targetsWeb ? $"{assemblyName}.so"
+                : targetsWeb || targetsLinux ? $"{assemblyName}.so"
                 : $"{assemblyName}.dylib";
             string stagedLibrary = Path.Combine(stageDir, stagedName);
             File.Copy(builtLibrary, stagedLibrary, overwrite: true);
