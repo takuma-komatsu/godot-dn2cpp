@@ -40,6 +40,12 @@ namespace GodotTools.Export
 
         private List<string> _tempFolders = new List<string>();
 
+        // _ExportEnd takes no arguments, so what the Web import-closure check needs
+        // is remembered across the export: the path the export is writing to, and
+        // the check the exporter prepared (null on every non-Web export).
+        private string? _exportPath;
+        private Dn2CppExporter.WebImportCheck? _webImportCheck;
+
         private static bool ProjectContainsDotNet()
         {
             return File.Exists(GodotSharpDirs.ProjectSlnPath);
@@ -190,6 +196,9 @@ namespace GodotTools.Export
         public override void _ExportBegin(string[] features, bool isDebug, string path, uint flags)
         {
             base._ExportBegin(features, isDebug, path, flags);
+
+            _exportPath = path;
+            _webImportCheck = null;
 
             try
             {
@@ -610,6 +619,8 @@ namespace GodotTools.Export
 
                 AddAppleEmbeddedPlatformEmbeddedFramework(xcFrameworkPath);
             }
+
+            _webImportCheck = dn2CppExporter?.GetWebImportCheck();
         }
 
         private static void RecursePublishContents(string path, Func<string, bool> filterDir,
@@ -781,6 +792,30 @@ namespace GodotTools.Export
         public override void _ExportEnd()
         {
             base._ExportEnd();
+
+            // The one hook after the platform exporter has written the page, so it
+            // is where the Web drop-in's import closure can be checked against the
+            // staged main module. Messages added here still reach the export dialog,
+            // and an Error one makes it report failure — _ExportEnd has no return
+            // value to fail the export with.
+            if (_webImportCheck is { } webImportCheck && _exportPath is { } exportPath)
+            {
+                _webImportCheck = null;
+                _exportPath = null;
+                try
+                {
+                    webImportCheck.Verify(exportPath, GetExportPlatform());
+                }
+                catch (Exception e)
+                {
+                    // The check failing to run is not the game being broken, but it
+                    // must not pass silently either.
+                    GetExportPlatform().AddMessage(EditorExportPlatform.ExportMessageType.Warning,
+                        "Export .NET Project",
+                        $"The wasm import-closure check itself failed: {e.Message}. The exported game's imports " +
+                        "ship unverified.");
+                }
+            }
 
             string aotTempDir = Path.Combine(Path.GetTempPath(), $"godot-aot-{System.Environment.ProcessId}");
 

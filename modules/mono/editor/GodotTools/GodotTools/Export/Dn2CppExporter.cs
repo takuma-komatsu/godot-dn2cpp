@@ -152,6 +152,13 @@ namespace GodotTools.Export
         private readonly HashSet<string> _transpiled = new HashSet<string>();
 
         /// <summary>
+        /// File names of the wasm side modules this export staged — the drop-in and
+        /// every extra shared object. Recorded for <c>_ExportEnd</c>'s import-closure
+        /// check, which runs after the platform exporter has written the page.
+        /// </summary>
+        private readonly List<string> _stagedWebModules = new List<string>();
+
+        /// <summary>
         /// The slot layout of <c>.godot/mono/dn2cpp</c>, recorded in the work dir as
         /// <c>layout.txt</c>. Bump it whenever a slot's NAME changes: 2 is GE-6's
         /// per-config <c>il/</c> and <c>gen/</c>, 1 the per-RID ones before it (and
@@ -905,6 +912,8 @@ namespace GodotTools.Export
                 : $"{assemblyName}.dylib";
             string stagedLibrary = Path.Combine(stageDir, stagedName);
             File.Copy(builtLibrary, stagedLibrary, overwrite: true);
+            if (targetsWeb)
+                _stagedWebModules.Add(stagedName);
 
             // Nothing copies it into the publish directory as well. The iOS
             // packaging tail lipos one {assembly}.dylib per entry of the export's
@@ -934,6 +943,8 @@ namespace GodotTools.Export
 
                 string stagedSharedObject = Path.Combine(stageDir, Path.GetFileName(sharedObject));
                 File.Copy(sharedObject, stagedSharedObject, overwrite: true);
+                if (targetsWeb)
+                    _stagedWebModules.Add(Path.GetFileName(sharedObject));
                 LogLine($"staged {stagedSharedObject}");
                 GD.Print($"dn2cpp: staged extra shared object {stagedSharedObject}");
             }
@@ -2099,6 +2110,171 @@ namespace GodotTools.Export
 
             return string.Equals(Normalize(a), Normalize(b),
                 OS.IsWindows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// What <c>_ExportEnd</c>'s Web import-closure check needs, captured before
+        /// this exporter is disposed; null when this export staged no wasm side
+        /// module (every non-Web target).
+        /// </summary>
+        public WebImportCheck? GetWebImportCheck() =>
+            _stagedWebModules.Count > 0
+                ? new WebImportCheck(_toolchain.Dn2CppExe, _stagedWebModules.ToArray())
+                : null;
+
+        /// <summary>
+        /// Verifies each staged side module's imports against the exported page's
+        /// main module and JS glue, via <c>dn2cpp --check-wasm-imports</c>. Runs from
+        /// <c>_ExportEnd</c> — the only plugin hook after the platform exporter has
+        /// written those files — because Emscripten's dlopen does not fail on an
+        /// unresolved symbol: the game ships, loads, and dies in the player's browser
+        /// with 'TypeError: resolved is not a function' naming a wasm function index
+        /// and nothing else. So the import set is asserted statically, here.
+        /// </summary>
+        internal sealed class WebImportCheck
+        {
+            private const string MessageCategory = "Export .NET Project";
+
+            private readonly string _dn2cppExe;
+            private readonly string[] _sideModules;
+
+            internal WebImportCheck(string dn2cppExe, string[] sideModules)
+            {
+                _dn2cppExe = dn2cppExe;
+                _sideModules = sideModules;
+            }
+
+            /// <summary>
+            /// An unsatisfied import is an Error — the export dialog reports the
+            /// export as failed. A check that could not run is a Warning: never
+            /// reported as a broken game, never allowed to pass silently.
+            /// </summary>
+            public void Verify(string exportPath, EditorExportPlatform platform)
+            {
+                // "Export PCK/ZIP" fires the begin/end hooks too, with a .pck/.zip
+                // path — no platform exporter runs and no wasm is written. The Web's
+                // real export target is always .html.
+                if (!exportPath.EndsWith(".html", StringComparison.OrdinalIgnoreCase))
+                    return;
+
+                string baseDir = Path.GetDirectoryName(Path.GetFullPath(exportPath))!;
+                string basename = Path.GetFileNameWithoutExtension(exportPath);
+                string mainWasm = Path.Combine(baseDir, basename + ".wasm");
+                string mainJs = Path.Combine(baseDir, basename + ".js");
+
+                // The main module appears at template extraction, after every step
+                // that can fail the export — an export that died earlier has its own
+                // error in the dialog and nothing here to check against.
+                if (!File.Exists(mainWasm))
+                    return;
+
+                if (!File.Exists(mainJs))
+                {
+                    CouldNotRun(platform, string.Join(", ", _sideModules),
+                        $"the main module's JS glue '{mainJs}' is not in the exported page");
+                    return;
+                }
+
+                foreach (string sideModule in _sideModules)
+                {
+                    string sidePath = Path.Combine(baseDir, sideModule);
+                    if (!File.Exists(sidePath))
+                    {
+                        CouldNotRun(platform, sideModule, $"'{sidePath}' is not in the exported page");
+                        continue;
+                    }
+
+                    int exitCode;
+                    List<string> stdout, stderr;
+                    try
+                    {
+                        (exitCode, stdout, stderr) = RunChecker(sidePath, mainWasm, mainJs);
+                    }
+                    catch (Exception e) when (e is System.ComponentModel.Win32Exception
+                                                  or InvalidOperationException or IOException)
+                    {
+                        CouldNotRun(platform, sideModule, $"'{_dn2cppExe}' could not be run: {e.Message}");
+                        continue;
+                    }
+
+                    if (exitCode == 0)
+                    {
+                        GD.Print($"dn2cpp: wasm import closure verified: {sideModule}");
+                        continue;
+                    }
+
+                    if (exitCode == 3 && stdout.Count > 0)
+                    {
+                        platform.AddMessage(EditorExportPlatform.ExportMessageType.Error, MessageCategory,
+                            $"'{sideModule}' imports symbols nothing in the exported page defines. Emscripten's " +
+                            "dlopen does not fail on an unresolved symbol, so the game would ship and die in the " +
+                            "player's browser at the first call, as 'TypeError: resolved is not a function' naming " +
+                            "a wasm function index and nothing else. Unsatisfied:\n  " +
+                            string.Join("\n  ", stdout) + "\n" +
+                            "A SystemNative_* name is a .NET PAL symbol the wasm build does not define — dn2cpp's " +
+                            "runtime/core/platform/wasm/ carries only the sliver this target needs, and the symbol " +
+                            "is added there. A symbol of a library staged through " +
+                            $"'{ExtraSharedObjectsSetting}' must be exported by the page's main module or by " +
+                            "another staged module.");
+                        continue;
+                    }
+
+                    // Exit 2 (unreadable input, or a dn2cpp predating the
+                    // subcommand) or any other surprise: the checker refused to
+                    // answer, which is not an answer.
+                    CouldNotRun(platform, sideModule,
+                        $"'{_dn2cppExe} --check-wasm-imports' exited {exitCode}: " +
+                        (stderr.FirstOrDefault() ?? stdout.FirstOrDefault() ?? "no output"));
+                }
+            }
+
+            private static void CouldNotRun(EditorExportPlatform platform, string what, string reason)
+            {
+                platform.AddMessage(EditorExportPlatform.ExportMessageType.Warning, MessageCategory,
+                    $"The wasm import-closure check did not run over '{what}': {reason}. That is a failure of " +
+                    "the check, not proof the game is broken — but its imports ship unverified, and an " +
+                    "unresolved symbol only surfaces in the player's browser.");
+            }
+
+            private (int ExitCode, List<string> Stdout, List<string> Stderr) RunChecker(
+                string sidePath, string mainWasm, string mainJs)
+            {
+                using var process = new Process
+                {
+                    StartInfo = new ProcessStartInfo(_dn2cppExe)
+                    {
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        CreateNoWindow = true,
+                    },
+                };
+
+                foreach (string arg in new[] { "--check-wasm-imports", sidePath, mainWasm, mainJs })
+                    process.StartInfo.ArgumentList.Add(arg);
+
+                var stdout = new List<string>();
+                var stderr = new List<string>();
+                process.OutputDataReceived += (_, e) =>
+                {
+                    if (e.Data is not null)
+                        stdout.Add(e.Data);
+                };
+                process.ErrorDataReceived += (_, e) =>
+                {
+                    if (e.Data is not null)
+                        stderr.Add(e.Data);
+                };
+
+                process.Start();
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+                // Drains both asynchronous readers before returning, so the lists
+                // are complete and no longer written to.
+                process.WaitForExit();
+
+                return (process.ExitCode, stdout, stderr);
+            }
         }
 
         public void Dispose()
