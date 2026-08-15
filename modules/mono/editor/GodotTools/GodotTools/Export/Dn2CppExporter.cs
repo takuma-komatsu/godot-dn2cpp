@@ -2146,8 +2146,9 @@ namespace GodotTools.Export
             }
 
             /// <summary>
-            /// An unsatisfied import is an Error — the export dialog reports the
-            /// export as failed. A check that could not run is a Warning: never
+            /// An unsatisfied import, or a staged module absent from the page, is
+            /// an Error — the export is reported as failed, and a headless export
+            /// exits non-zero. A check that could not run is a Warning: never
             /// reported as a broken game, never allowed to pass silently.
             /// </summary>
             public void Verify(string exportPath, EditorExportPlatform platform)
@@ -2188,9 +2189,14 @@ namespace GodotTools.Export
                 foreach (string sideModule in _sideModules)
                 {
                     string sidePath = Path.Combine(baseDir, sideModule);
+                    // This module was staged, so its absence from the page is not a
+                    // check that could not run: the game has no code to load.
                     if (!File.Exists(sidePath))
                     {
-                        CouldNotRun(platform, sideModule, $"'{sidePath}' is not in the exported page");
+                        platform.AddMessage(EditorExportPlatform.ExportMessageType.Error, MessageCategory,
+                            $"The compiled game module '{sideModule}' was staged for this export but '{sidePath}' " +
+                            "is not in the exported page. The exported game has nothing to load its C# code from " +
+                            "and cannot run.");
                         continue;
                     }
 
