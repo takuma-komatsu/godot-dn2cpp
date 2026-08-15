@@ -2124,7 +2124,8 @@ namespace GodotTools.Export
 
         /// <summary>
         /// Verifies each staged side module's imports against the exported page's
-        /// main module and JS glue, via <c>dn2cpp --check-wasm-imports</c>. Runs from
+        /// main module, JS glue and the other staged modules, via
+        /// <c>dn2cpp --check-wasm-imports</c>. Runs from
         /// <c>_ExportEnd</c> — the only plugin hook after the platform exporter has
         /// written those files — because Emscripten's dlopen does not fail on an
         /// unresolved symbol: the game ships, loads, and dies in the player's browser
@@ -2162,11 +2163,15 @@ namespace GodotTools.Export
                 string mainWasm = Path.Combine(baseDir, basename + ".wasm");
                 string mainJs = Path.Combine(baseDir, basename + ".js");
 
-                // The main module appears at template extraction, after every step
-                // that can fail the export — an export that died earlier has its own
-                // error in the dialog and nothing here to check against.
+                // The main module appears at template extraction, so its absence
+                // means the export died earlier — but that death has its own error
+                // and this check still did not run, which must be said.
                 if (!File.Exists(mainWasm))
+                {
+                    CouldNotRun(platform, string.Join(", ", _sideModules),
+                        $"the main module '{mainWasm}' is not in the exported page");
                     return;
+                }
 
                 if (!File.Exists(mainJs))
                 {
@@ -2174,6 +2179,11 @@ namespace GodotTools.Export
                         $"the main module's JS glue '{mainJs}' is not in the exported page");
                     return;
                 }
+
+                string[] stagedPaths = _sideModules
+                    .Select(m => Path.Combine(baseDir, m))
+                    .Where(File.Exists)
+                    .ToArray();
 
                 foreach (string sideModule in _sideModules)
                 {
@@ -2184,11 +2194,16 @@ namespace GodotTools.Export
                         continue;
                     }
 
+                    // Emscripten merges every loaded module's exports into one
+                    // symbol pool, so a staged sibling legitimately satisfies this
+                    // module's imports — its exports join the check as peers.
+                    string[] peers = stagedPaths.Where(p => p != sidePath).ToArray();
+
                     int exitCode;
                     List<string> stdout, stderr;
                     try
                     {
-                        (exitCode, stdout, stderr) = RunChecker(sidePath, mainWasm, mainJs);
+                        (exitCode, stdout, stderr) = RunChecker(sidePath, mainWasm, mainJs, peers);
                     }
                     catch (Exception e) when (e is System.ComponentModel.Win32Exception
                                                   or InvalidOperationException or IOException)
@@ -2206,22 +2221,24 @@ namespace GodotTools.Export
                     if (exitCode == 3 && stdout.Count > 0)
                     {
                         platform.AddMessage(EditorExportPlatform.ExportMessageType.Error, MessageCategory,
-                            $"'{sideModule}' imports symbols nothing in the exported page defines. Emscripten's " +
-                            "dlopen does not fail on an unresolved symbol, so the game would ship and die in the " +
-                            "player's browser at the first call, as 'TypeError: resolved is not a function' naming " +
-                            "a wasm function index and nothing else. Unsatisfied:\n  " +
+                            $"'{sideModule}' imports symbols nothing in the exported page defines — not the main " +
+                            "module, not its JS glue, not any other staged module. Emscripten's dlopen does not " +
+                            "fail on an unresolved symbol, so the game would ship and die in the player's browser " +
+                            "at the first call, as 'TypeError: resolved is not a function' naming a wasm function " +
+                            "index and nothing else. Unsatisfied:\n  " +
                             string.Join("\n  ", stdout) + "\n" +
                             "A SystemNative_* name is a .NET PAL symbol the wasm build does not define — dn2cpp's " +
                             "runtime/core/platform/wasm/ carries only the sliver this target needs, and the symbol " +
-                            "is added there. A symbol of a library staged through " +
-                            $"'{ExtraSharedObjectsSetting}' must be exported by the page's main module or by " +
-                            "another staged module.");
+                            "is added there. For a symbol of a library staged through " +
+                            $"'{ExtraSharedObjectsSetting}', the library that defines it must be staged too, or " +
+                            "the module that was staged must be rebuilt to export it.");
                         continue;
                     }
 
                     // Exit 2 (unreadable input, or a dn2cpp predating the
-                    // subcommand) or any other surprise: the checker refused to
-                    // answer, which is not an answer.
+                    // subcommand), exit 1 (one predating --peer-module) or any
+                    // other surprise: the checker refused to answer, which is
+                    // not an answer.
                     CouldNotRun(platform, sideModule,
                         $"'{_dn2cppExe} --check-wasm-imports' exited {exitCode}: " +
                         (stderr.FirstOrDefault() ?? stdout.FirstOrDefault() ?? "no output"));
@@ -2237,7 +2254,7 @@ namespace GodotTools.Export
             }
 
             private (int ExitCode, List<string> Stdout, List<string> Stderr) RunChecker(
-                string sidePath, string mainWasm, string mainJs)
+                string sidePath, string mainWasm, string mainJs, string[] peers)
             {
                 using var process = new Process
                 {
@@ -2252,6 +2269,11 @@ namespace GodotTools.Export
 
                 foreach (string arg in new[] { "--check-wasm-imports", sidePath, mainWasm, mainJs })
                     process.StartInfo.ArgumentList.Add(arg);
+                foreach (string peer in peers)
+                {
+                    process.StartInfo.ArgumentList.Add("--peer-module");
+                    process.StartInfo.ArgumentList.Add(peer);
+                }
 
                 var stdout = new List<string>();
                 var stderr = new List<string>();
