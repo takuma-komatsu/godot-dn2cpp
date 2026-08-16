@@ -1405,6 +1405,10 @@ void EditorNode::_fs_changed() {
 						err = platform->export_project(export_preset, export_defer.debug, export_path);
 					}
 				}
+				// An error-class message is a failed export, mirroring fill_log_messages()' verdict in the GUI.
+				if (err == OK && platform->get_worst_message_type() >= EditorExportPlatform::EXPORT_MESSAGE_ERROR) {
+					err = FAILED;
+				}
 				if (err != OK) {
 					export_error = vformat("Project export for preset \"%s\" failed.", preset_name);
 				} else if (platform->get_worst_message_type() >= EditorExportPlatform::EXPORT_MESSAGE_WARNING) {
