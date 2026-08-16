@@ -795,9 +795,9 @@ namespace GodotTools.Export
 
             // The one hook after the platform exporter has written the page, so it
             // is where the Web drop-in's import closure can be checked against the
-            // staged main module. Messages added here still reach the export dialog,
-            // and an Error one makes it report failure — _ExportEnd has no return
-            // value to fail the export with.
+            // staged main module. _ExportEnd has no return value, so an Error message
+            // is the only channel that fails the export: the dialog reports failure
+            // and a headless export exits non-zero.
             if (_webImportCheck is { } webImportCheck && _exportPath is { } exportPath)
             {
                 _webImportCheck = null;
