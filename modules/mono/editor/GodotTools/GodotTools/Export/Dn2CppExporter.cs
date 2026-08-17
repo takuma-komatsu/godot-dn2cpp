@@ -788,6 +788,14 @@ namespace GodotTools.Export
             transpileArgs.Add("-r");
             transpileArgs.Add(_toolchain.RuntimeShim);
             transpileArgs.Add("--auto-ref");
+            // link.xml belongs to the source project, not the transient publish output.
+            transpileArgs.Add("--project-root");
+            transpileArgs.Add(Path.GetDirectoryName(GodotSharpDirs.ProjectCsProjPath)!);
+            if (_godotPlatform == OS.Platforms.Windows)
+            {
+                transpileArgs.Add("--link-feature");
+                transpileArgs.Add("com");
+            }
             // Web only, and not an optimization: without it the game does not load at all.
             // The Web target links the generated C++ as an Emscripten wasm SIDE MODULE, and
             // a side module's __wasm_apply_data_relocs — one i32.store per pointer that lives
