@@ -8,7 +8,7 @@
 
 ## This fork: dn2cpp export backend
 
-This is a fork of Godot 4.7.1-stable that adds the **dn2cpp** export backend: a
+This is a fork of Godot 4.7.2-stable that adds the **dn2cpp** export backend: a
 C# game is transpiled from .NET IL to native C++ and linked into the exported
 binary, so the shipped game needs no .NET runtime.
 
@@ -17,10 +17,11 @@ It changes the editor-side export path and the Web platform only:
 `Dn2CppToolchain.cs`, plus hooks in the export plugin and build manager),
 `modules/mono/build_scripts/build_assemblies.py`, `platform/web/**`, and one
 `WEB_ENABLED` guard in `modules/mono/mono_gd/gd_mono.cpp`. The mono module's
-interop ABI (`unmanaged_callbacks[]` / `ManagedCallbacks.cs`) is untouched, so
-this engine stays a drop-in host for stock GodotSharp assemblies.
+interop ABI (`unmanaged_callbacks[]`, `ManagedCallbacks.cs`, and
+`NativeFuncs.cs`) is untouched, so this engine stays a drop-in host for stock
+GodotSharp assemblies.
 
-Upstream base commit: `a13da4feb8d8aefc283c3763d33a2f170a18d541` (4.7.1-stable).
+Upstream base commit: `ed1daf0bf001b61586d9930840f2f1394092c079` (4.7.2-stable).
 Prebuilt binaries (macOS and Windows editors, macOS and Web export templates)
 are on the [Releases](../../releases) page. The transpiler itself lives in
 [takuma-komatsu/dn2cpp](https://github.com/takuma-komatsu/dn2cpp).
