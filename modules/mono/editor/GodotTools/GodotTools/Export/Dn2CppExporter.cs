@@ -550,7 +550,7 @@ namespace GodotTools.Export
         /// alongside would route the exported game straight back to the .NET host.
         /// </remarks>
         public string BuildDropIn(string publishOutputDir, string assemblyName, string buildConfig,
-            string runtimeIdentifier, string arch)
+            string runtimeIdentifier, string arch, string? macOSDeploymentTarget)
         {
             // Create refuses any target set the backend cannot build, but it sees
             // one publish config and the caller loops over every architecture of
@@ -691,6 +691,19 @@ namespace GodotTools.Export
                 configureArgs.Add($"-DCMAKE_OSX_SYSROOT={sysroot}");
                 configureArgs.Add($"-DCMAKE_OSX_ARCHITECTURES={arch}");
                 configureArgs.Add($"-DCMAKE_OSX_DEPLOYMENT_TARGET={IOSDeploymentTarget}");
+            }
+            else if (_godotPlatform == OS.Platforms.MacOS)
+            {
+                // The platform exporter records this architecture's preset value
+                // in the app bundle. Compile the drop-in under the same contract;
+                // otherwise clang silently adopts the host SDK version.
+                if (string.IsNullOrWhiteSpace(macOSDeploymentTarget))
+                {
+                    throw new InvalidOperationException(
+                        $"The macOS export preset has no deployment target for '{arch}'.");
+                }
+
+                configureArgs.Add($"-DCMAKE_OSX_DEPLOYMENT_TARGET={macOSDeploymentTarget}");
             }
             else if (targetsAndroid)
             {

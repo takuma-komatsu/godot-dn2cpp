@@ -457,8 +457,12 @@ namespace GodotTools.Export
                     // It runs before the simulator skip below: the simulator
                     // outputs are never bundled, but their libraries feed the
                     // xcframework tail after this loop.
+                    string? macOSDeploymentTarget = dn2CppExporter is not null && platform == OS.Platforms.MacOS
+                        ? (string)GetOption($"application/min_macos_version_{arch}")
+                        : null;
                     string? dn2CppContentsDir = dn2CppExporter?.BuildDropIn(publishOutputDir,
-                        GodotSharpDirs.ProjectAssemblyName, buildConfig, runtimeIdentifier, arch);
+                        GodotSharpDirs.ProjectAssemblyName, buildConfig, runtimeIdentifier, arch,
+                        macOSDeploymentTarget);
 
                     // Where THIS slot's library landed, for the iOS tail below: it
                     // reads one {Assembly}.dylib per entry, so an entry has to be a
