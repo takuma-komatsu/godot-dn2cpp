@@ -518,7 +518,7 @@ namespace GodotTools.Export
             // is not a missing file: the transpile SUCCEEDS against the Windows
             // framework and the failure surfaces as a linker complaining about
             // -lkernel32, or as an ole32 import no Emscripten link can satisfy —
-            // neither of which names a CoreLib flavour, an export backend, or this
+            // neither of which names a CoreLib flavor, an export backend, or this
             // sentence.
             if (Dn2CppToolchain.NeedsCrossCoreLib(godotPlatform)
                 && !File.Exists(toolchain.CrossCoreLibRef))
@@ -550,7 +550,7 @@ namespace GodotTools.Export
         /// alongside would route the exported game straight back to the .NET host.
         /// </remarks>
         public string BuildDropIn(string publishOutputDir, string assemblyName, string buildConfig,
-            string runtimeIdentifier, string arch, string? macOSDeploymentTarget)
+            string runtimeIdentifier, string arch, string? macOSDeploymentTarget, bool keepWebSymbols)
         {
             // Create refuses any target set the backend cannot build, but it sees
             // one publish config and the caller loops over every architecture of
@@ -723,10 +723,17 @@ namespace GodotTools.Export
             // never resets a cached variable, so an emptied setting must
             // overwrite the cache rather than leave the previous export's flags
             // armed.
-            string extraLinkFlags = string.Join(' ', GetPathListSetting(ExtraLinkFlagsSetting));
+            string[] projectLinkFlags = GetPathListSetting(ExtraLinkFlagsSetting);
+            var appLinkFlags = new List<string>(projectLinkFlags);
+            if (targetsWeb && keepWebSymbols)
+            {
+                appLinkFlags.Add("-g2");
+                GD.Print("dn2cpp: keeping Web function names (-g2)");
+            }
+            string extraLinkFlags = string.Join(' ', appLinkFlags);
             string extraLinkLibs = string.Join(' ', GetPathListSetting(ExtraLinkLibsSetting));
-            if (extraLinkFlags.Length > 0)
-                GD.Print($"dn2cpp: extra link flags (project setting): {extraLinkFlags}");
+            if (projectLinkFlags.Length > 0)
+                GD.Print($"dn2cpp: extra link flags (project setting): {string.Join(' ', projectLinkFlags)}");
             if (extraLinkLibs.Length > 0)
                 GD.Print($"dn2cpp: extra link libs (project setting): {extraLinkLibs}");
             configureArgs.Add($"-DDN2CPP_APP_LINK_FLAGS={extraLinkFlags}");
@@ -781,7 +788,7 @@ namespace GodotTools.Export
                 // Ordered before any publish-directory reference so the pinned
                 // framework closure wins the --auto-ref search described above.
                 // Which framework is a function of the EXPORT TARGET, not of the
-                // host: a cross-compiled target needs the POSIX flavour, because the
+                // host: a cross-compiled target needs the POSIX flavor, because the
                 // CoreLib's IL is what decides the native libraries the emitted
                 // P/Invokes name (Dn2CppToolchain.CoreLibRefFor). Create() has
                 // already refused the export if the one this needs is not staged.
@@ -1008,7 +1015,7 @@ namespace GodotTools.Export
             // hard-coded ref/ agrees with it only for as long as the two directories
             // hold the same assembly names — an invariant nothing enforces and no
             // failure would announce, since the symptom is a framework assembly passed
-            // twice under two flavours. So the directory is derived from the reference
+            // twice under two flavors. So the directory is derived from the reference
             // itself.
             string frameworkRefDir = Path.GetDirectoryName(_toolchain.CoreLibRefFor(_godotPlatform))!;
 
@@ -1569,7 +1576,7 @@ namespace GodotTools.Export
         /// <summary>
         /// The node emcc will start, and the arm that answered. The SDK's own node
         /// is COMPUTED from the layout rather than read out of <c>.emscripten</c>,
-        /// the flavour <see cref="ResolveEmscriptenPython"/> takes with
+        /// the flavor <see cref="ResolveEmscriptenPython"/> takes with
         /// <c>EMSDK_PYTHON</c>.
         /// </summary>
         private static (string? Exe, string Origin) ResolveEmscriptenNode(EmscriptenSdk sdk)
