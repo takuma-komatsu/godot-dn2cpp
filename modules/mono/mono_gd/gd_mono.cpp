@@ -504,7 +504,13 @@ godot_plugins_initialize_fn try_load_native_aot_library(void *&r_aot_dll_handle)
 #error "Platform not supported (yet?)"
 #endif
 
+#if defined(WINDOWS_ENABLED)
+	OS::GDExtensionData library_data;
+	library_data.also_set_library_path = true;
+	Error err = OS::get_singleton()->open_dynamic_library(native_aot_so_path, r_aot_dll_handle, &library_data);
+#else
 	Error err = OS::get_singleton()->open_dynamic_library(native_aot_so_path, r_aot_dll_handle);
+#endif
 
 	if (err != OK) {
 		return nullptr;
