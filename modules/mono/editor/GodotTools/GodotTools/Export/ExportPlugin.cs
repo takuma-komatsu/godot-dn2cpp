@@ -36,6 +36,8 @@ namespace GodotTools.Export
             Dn2Cpp = 2,
         }
 
+        private const string KeepSymbolsSetting = "dotnet/dn2cpp/keep_symbols";
+
         public override string _GetName() => "C#";
 
         private List<string> _tempFolders = new List<string>();
@@ -90,7 +92,7 @@ namespace GodotTools.Export
                         {
                             "option", new Godot.Collections.Dictionary()
                             {
-                                { "name", "dotnet/dn2cpp/keep_symbols" },
+                                { "name", KeepSymbolsSetting },
                                 { "type", (int)Variant.Type.Bool }
                             }
                         },
@@ -251,8 +253,6 @@ namespace GodotTools.Export
             }
 
             var exportBackend = (ExportBackend)(int)GetOption("dotnet/export_backend");
-            bool keepWebSymbols = platform == OS.Platforms.Web
-                && (bool)GetOption("dotnet/dn2cpp/keep_symbols");
 
             // Read before anything is published: every way the Web can fail is a
             // preset checkbox, and finding that out after a transpile and a native
@@ -261,6 +261,8 @@ namespace GodotTools.Export
             {
                 VerifyWebPreset(exportBackend, features);
             }
+
+            bool keepSymbols = platform == OS.Platforms.Web && (bool)GetOption(KeepSymbolsSetting);
 
             bool useAndroidLinuxBionic = (bool)GetOption("dotnet/android_use_linux_bionic");
             PublishConfig publishConfig = new()
@@ -482,7 +484,7 @@ namespace GodotTools.Export
                         : null;
                     string? dn2CppContentsDir = dn2CppExporter?.BuildDropIn(publishOutputDir,
                         GodotSharpDirs.ProjectAssemblyName, buildConfig, runtimeIdentifier, arch,
-                        macOSDeploymentTarget, keepWebSymbols);
+                        macOSDeploymentTarget, keepSymbols);
 
                     // Where THIS slot's library landed, for the iOS tail below: it
                     // reads one {Assembly}.dylib per entry, so an entry has to be a

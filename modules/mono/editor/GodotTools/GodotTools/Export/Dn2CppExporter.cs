@@ -550,7 +550,7 @@ namespace GodotTools.Export
         /// alongside would route the exported game straight back to the .NET host.
         /// </remarks>
         public string BuildDropIn(string publishOutputDir, string assemblyName, string buildConfig,
-            string runtimeIdentifier, string arch, string? macOSDeploymentTarget, bool keepWebSymbols)
+            string runtimeIdentifier, string arch, string? macOSDeploymentTarget, bool keepSymbols)
         {
             // Create refuses any target set the backend cannot build, but it sees
             // one publish config and the caller loops over every architecture of
@@ -723,17 +723,19 @@ namespace GodotTools.Export
             // never resets a cached variable, so an emptied setting must
             // overwrite the cache rather than leave the previous export's flags
             // armed.
-            string[] projectLinkFlags = GetPathListSetting(ExtraLinkFlagsSetting);
-            var appLinkFlags = new List<string>(projectLinkFlags);
-            if (targetsWeb && keepWebSymbols)
+            string projectLinkFlags = string.Join(' ', GetPathListSetting(ExtraLinkFlagsSetting));
+            string extraLinkFlags = projectLinkFlags;
+            if (targetsWeb && keepSymbols)
             {
-                appLinkFlags.Add("-g2");
-                GD.Print("dn2cpp: keeping Web function names (-g2)");
+                if (extraLinkFlags.Length > 0)
+                    extraLinkFlags += " ";
+                extraLinkFlags += "-g2";
             }
-            string extraLinkFlags = string.Join(' ', appLinkFlags);
             string extraLinkLibs = string.Join(' ', GetPathListSetting(ExtraLinkLibsSetting));
             if (projectLinkFlags.Length > 0)
-                GD.Print($"dn2cpp: extra link flags (project setting): {string.Join(' ', projectLinkFlags)}");
+                GD.Print($"dn2cpp: extra link flags (project setting): {projectLinkFlags}");
+            if (targetsWeb && keepSymbols)
+                GD.Print("dn2cpp: keeping Web symbols (-g2)");
             if (extraLinkLibs.Length > 0)
                 GD.Print($"dn2cpp: extra link libs (project setting): {extraLinkLibs}");
             configureArgs.Add($"-DDN2CPP_APP_LINK_FLAGS={extraLinkFlags}");
