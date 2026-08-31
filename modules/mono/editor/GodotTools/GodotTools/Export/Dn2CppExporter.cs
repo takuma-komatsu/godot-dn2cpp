@@ -512,7 +512,7 @@ namespace GodotTools.Export
                 VerifyEmscriptenNode(emscripten);
             }
 
-            // A cross-target export off a Windows host transpiles the POSIX-flavour
+            // A cross-target export off a Windows host transpiles the POSIX flavor
             // framework, not the bundle's host one (Dn2CppToolchain.NeedsCrossCoreLib
             // says why). Checked here rather than at the -r, because the alternative
             // is not a missing file: the transpile SUCCEEDS against the Windows
