@@ -1,0 +1,14 @@
+diff --git a/SConstruct b/SConstruct
+index 419264d..9784b8c 100644
+--- a/SConstruct
++++ b/SConstruct
+@@ -44,6 +44,9 @@ if scons_cache_path is not None:
+     Decider("MD5")
+ 
+ cpp_tool.generate(env)
++# Custom APIs can generate enough wrappers to exceed the process argument limit.
++env["ARCOM"] = '${TEMPFILE("$AR $ARFLAGS $TARGET $SOURCES", "$ARCOMSTR")}'
++
+ library = env.GodotCPP()
+ 
+ Return("env")
