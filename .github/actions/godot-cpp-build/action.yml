@@ -33,6 +33,11 @@ runs:
       shell: sh
       run: ${{ inputs.bin }} --headless --dump-gdextension-interface --dump-extension-api
 
+    - name: Enable archive response files
+      if: runner.os == 'Linux'
+      shell: sh
+      run: git -C ./godot-cpp apply "${GITHUB_ACTION_PATH}/use-archive-response-file.patch"
+
     - name: SCons Build
       shell: sh
       env:
