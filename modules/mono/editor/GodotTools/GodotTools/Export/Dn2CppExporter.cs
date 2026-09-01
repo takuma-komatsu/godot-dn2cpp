@@ -550,7 +550,8 @@ namespace GodotTools.Export
         /// alongside would route the exported game straight back to the .NET host.
         /// </remarks>
         public string BuildDropIn(string publishOutputDir, string assemblyName, string buildConfig,
-            string runtimeIdentifier, string arch, string? macOSDeploymentTarget, bool keepWebSymbols)
+            string runtimeIdentifier, string arch, string? macOSDeploymentTarget, bool keepWebSymbols,
+            bool incrementalGcDefault)
         {
             // Create refuses any target set the backend cannot build, but it sees
             // one publish config and the caller loops over every architecture of
@@ -676,6 +677,7 @@ namespace GodotTools.Export
                 // entry lands as UNINITIALIZED where cmake's own is a FILEPATH.
                 $"-DCMAKE_MAKE_PROGRAM:FILEPATH={CMakePath(_ninjaExe)}",
                 "-DDN2CPP_DOTNET_MODULE=ON",
+                $"-DDN2CPP_GC_INCREMENTAL_DEFAULT={(incrementalGcDefault ? "ON" : "OFF")}",
                 $"-DDN2CPP_APP_DIR={CMakePath(genDir)}",
                 $"-DDN2CPP_APP_NAME={targetName}",
             };

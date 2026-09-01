@@ -177,6 +177,7 @@ EditorPropertyNameProcessor::EditorPropertyNameProcessor() {
 	capitalize_string_remaps["db"] = "dB";
 	capitalize_string_remaps["dof"] = "DoF";
 	capitalize_string_remaps["dpi"] = "DPI";
+	capitalize_string_remaps["dn2cpp"] = "dn2cpp";
 	capitalize_string_remaps["dtls"] = "DTLS";
 	capitalize_string_remaps["eol"] = "EOL";
 	capitalize_string_remaps["erp"] = "ERP";

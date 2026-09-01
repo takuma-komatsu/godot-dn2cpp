@@ -81,24 +81,6 @@ namespace GodotTools.Export
                 );
             }
 
-            if (platform.GetOsName().Equals(OS.Platforms.Web, StringComparison.OrdinalIgnoreCase))
-            {
-                exportOptionList.Add
-                (
-                    new Godot.Collections.Dictionary()
-                    {
-                        {
-                            "option", new Godot.Collections.Dictionary()
-                            {
-                                { "name", "dotnet/dn2cpp/keep_symbols" },
-                                { "type", (int)Variant.Type.Bool }
-                            }
-                        },
-                        { "default_value", false }
-                    }
-                );
-            }
-
             exportOptionList.Add
             (
                 new Godot.Collections.Dictionary()
@@ -157,6 +139,41 @@ namespace GodotTools.Export
                     { "default_value", (int)ExportBackend.HostRuntime }
                 }
             );
+
+            if (platform.GetOsName().Equals(OS.Platforms.Web, StringComparison.OrdinalIgnoreCase))
+            {
+                exportOptionList.Add
+                (
+                    new Godot.Collections.Dictionary()
+                    {
+                        {
+                            "option", new Godot.Collections.Dictionary()
+                            {
+                                { "name", "dotnet/dn2cpp/keep_symbols" },
+                                { "type", (int)Variant.Type.Bool }
+                            }
+                        },
+                        { "default_value", false }
+                    }
+                );
+            }
+            else
+            {
+                exportOptionList.Add
+                (
+                    new Godot.Collections.Dictionary()
+                    {
+                        {
+                            "option", new Godot.Collections.Dictionary()
+                            {
+                                { "name", "dotnet/dn2cpp/incremental_gc" },
+                                { "type", (int)Variant.Type.Bool }
+                            }
+                        },
+                        { "default_value", true }
+                    }
+                );
+            }
             return exportOptionList;
         }
 
@@ -253,6 +270,8 @@ namespace GodotTools.Export
             var exportBackend = (ExportBackend)(int)GetOption("dotnet/export_backend");
             bool keepWebSymbols = platform == OS.Platforms.Web
                 && (bool)GetOption("dotnet/dn2cpp/keep_symbols");
+            bool incrementalGcDefault = platform != OS.Platforms.Web
+                && (bool)GetOption("dotnet/dn2cpp/incremental_gc");
 
             // Read before anything is published: every way the Web can fail is a
             // preset checkbox, and finding that out after a transpile and a native
@@ -482,7 +501,7 @@ namespace GodotTools.Export
                         : null;
                     string? dn2CppContentsDir = dn2CppExporter?.BuildDropIn(publishOutputDir,
                         GodotSharpDirs.ProjectAssemblyName, buildConfig, runtimeIdentifier, arch,
-                        macOSDeploymentTarget, keepWebSymbols);
+                        macOSDeploymentTarget, keepWebSymbols, incrementalGcDefault);
 
                     // Where THIS slot's library landed, for the iOS tail below: it
                     // reads one {Assembly}.dylib per entry, so an entry has to be a
