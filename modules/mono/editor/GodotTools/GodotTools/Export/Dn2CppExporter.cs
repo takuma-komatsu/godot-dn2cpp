@@ -64,7 +64,7 @@ namespace GodotTools.Export
 
         /// <summary>
         /// Project setting (PackedStringArray) appended verbatim to the transpiler
-        /// invocation, e.g. ["--pinvoke-module", "my_native_lib"] for a game
+        /// invocation, e.g. ["--direct-pinvoke", "my_native_lib"] for a game
         /// binding an external native library through a referenced assembly.
         /// </summary>
         private const string ExtraTranspileArgsSetting = "dotnet/dn2cpp/extra_transpile_args";
@@ -770,6 +770,7 @@ namespace GodotTools.Export
         private void Transpile(string publishOutputDir, string assemblyName, string ilDir, string genDir)
         {
             bool targetsWeb = _godotPlatform == OS.Platforms.Web;
+            bool targetsStaticPInvoke = targetsWeb || _godotPlatform == OS.Platforms.iOS;
 
             // The transpiler's --auto-ref resolves the game's framework references
             // from the directory of the first passed assembly that holds a
@@ -818,6 +819,14 @@ namespace GodotTools.Export
                 transpileArgs.Add("--link-feature");
                 transpileArgs.Add("com");
             }
+            // Web side modules and iOS images have no general-purpose dynamic loader.
+            // Keep every reached import visible to wasm-ld / the Mach-O static link;
+            // desktop and Android retain resolver-first lazy binding by default.
+            if (targetsStaticPInvoke)
+            {
+                transpileArgs.Add("--direct-pinvoke");
+                transpileArgs.Add("*");
+            }
             // Web only, and not an optimization: without it the game does not load at all.
             // The Web target links the generated C++ as an Emscripten wasm SIDE MODULE, and
             // a side module's __wasm_apply_data_relocs — one i32.store per pointer that lives
@@ -852,7 +861,7 @@ namespace GodotTools.Export
             // Project-declared extra transpiler arguments (the
             // "dotnet/dn2cpp/extra_transpile_args" project setting, a
             // PackedStringArray): the route for a per-project flag the exporter has
-            // no dedicated knob for — e.g. "--pinvoke-module my_native_lib" when
+            // no dedicated knob for — e.g. "--direct-pinvoke my_native_lib" when
             // the game binds an external native library through a referenced
             // binding assembly.
             // A PROJECT setting, deliberately not an environment variable: the flags
