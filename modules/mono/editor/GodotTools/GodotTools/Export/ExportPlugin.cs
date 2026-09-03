@@ -617,10 +617,19 @@ namespace GodotTools.Export
                                     }
                                     else
                                     {
+                                        // The stock Windows template opens the NativeAOT drop-in from its data
+                                        // directory without adding that directory to the PE dependency search.
+                                        // Keep the drop-in in its engine-defined location, but put project-declared
+                                        // sibling DLLs beside the executable where the OS loader finds them.
+                                        bool isDn2CppWindowsDependency = dn2CppContentsDir is not null
+                                            && platform == OS.Platforms.Windows
+                                            && Path.GetFileName(path) != $"{GodotSharpDirs.ProjectAssemblyName}.dll";
                                         AddSharedObject(path, tags: null,
-                                            Path.Join(projectDataDirName,
-                                                Path.GetRelativePath(exportContentsDir,
-                                                    Path.GetDirectoryName(path)!)));
+                                            isDn2CppWindowsDependency
+                                                ? string.Empty
+                                                : Path.Join(projectDataDirName,
+                                                    Path.GetRelativePath(exportContentsDir,
+                                                        Path.GetDirectoryName(path)!)));
                                     }
                                 }
                             }
