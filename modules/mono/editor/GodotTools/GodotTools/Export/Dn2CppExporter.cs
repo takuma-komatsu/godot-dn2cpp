@@ -88,10 +88,10 @@ namespace GodotTools.Export
 
         /// <summary>
         /// Project setting (PackedStringArray) of native library paths staged
-        /// beside the drop-in, so the platform exporter packages them the same
-        /// way — into the APK's lib/&lt;abi&gt;/ on Android, next to the data
-        /// directory elsewhere — e.g. a binding SDK's shared objects the
-        /// drop-in links against or dlopens.
+        /// with the drop-in for the platform exporter to package — into the
+        /// APK's lib/&lt;abi&gt;/ on Android and beside the executable on Windows,
+        /// for example. These are shared objects the drop-in links against or
+        /// opens dynamically.
         /// </summary>
         private const string ExtraSharedObjectsSetting = "dotnet/dn2cpp/extra_shared_objects";
 
@@ -963,11 +963,11 @@ namespace GodotTools.Export
             LogLine($"staged {stagedLibrary}");
             GD.Print($"dn2cpp: staged {stagedLibrary}");
 
-            // Project-declared extra native libraries, staged beside the drop-in
-            // so the platform exporter packages them by the same rules it
-            // packages the drop-in itself (Android tags shared objects into the
-            // APK's lib/<abi>/; the Web copies them next to index.html and
-            // preloads them). A missing path is an error, not a skip: a typo
+            // Project-declared extra native libraries are collected in the same
+            // staging tree as the drop-in; ExportPlugin chooses their final
+            // platform location (Android's lib/<abi>/, the Windows executable
+            // directory, or the Web page directory and preload list). A missing
+            // path is an error, not a skip: a typo
             // silently shipping a game without its native library would surface
             // as a dlopen failure on a player's machine, the one place this
             // diagnostic cannot reach anybody.
