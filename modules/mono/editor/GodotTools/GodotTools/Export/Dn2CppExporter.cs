@@ -551,7 +551,7 @@ namespace GodotTools.Export
         /// </remarks>
         public string BuildDropIn(string publishOutputDir, string assemblyName, string buildConfig,
             string runtimeIdentifier, string arch, string? macOSDeploymentTarget, bool keepWebSymbols,
-            bool incrementalGcDefault)
+            bool incrementalGcDefault, bool ilPrestripping)
         {
             // Create refuses any target set the backend cannot build, but it sees
             // one publish config and the caller loops over every architecture of
@@ -635,7 +635,7 @@ namespace GodotTools.Export
 
             if (_transpiled.Add(buildConfig))
             {
-                Transpile(publishOutputDir, assemblyName, ilDir, genDir);
+                Transpile(publishOutputDir, assemblyName, ilDir, genDir, ilPrestripping);
             }
             else
             {
@@ -767,7 +767,8 @@ namespace GodotTools.Export
         /// Transpiles the published game assembly into <paramref name="genDir"/>.
         /// Runs once per build config — see <see cref="_transpiled"/>.
         /// </summary>
-        private void Transpile(string publishOutputDir, string assemblyName, string ilDir, string genDir)
+        private void Transpile(string publishOutputDir, string assemblyName, string ilDir, string genDir,
+            bool ilPrestripping)
         {
             bool targetsWeb = _godotPlatform == OS.Platforms.Web;
             bool targetsStaticPInvoke = targetsWeb || _godotPlatform == OS.Platforms.iOS;
@@ -857,6 +858,10 @@ namespace GodotTools.Export
                 // <Godot.Full.Name>' is the escape hatch for a class only ever named
                 // from data).
                 transpileArgs.Add("--trim-godot-classes");
+            }
+            if (!ilPrestripping)
+            {
+                transpileArgs.Add("--no-ildiet");
             }
             // Project-declared extra transpiler arguments (the
             // "dotnet/dn2cpp/extra_transpile_args" project setting, a

@@ -140,6 +140,21 @@ namespace GodotTools.Export
                 }
             );
 
+            exportOptionList.Add
+            (
+                new Godot.Collections.Dictionary()
+                {
+                    {
+                        "option", new Godot.Collections.Dictionary()
+                        {
+                            { "name", "dotnet/dn2cpp/il_prestripping" },
+                            { "type", (int)Variant.Type.Bool }
+                        }
+                    },
+                    { "default_value", true }
+                }
+            );
+
             if (platform.GetOsName().Equals(OS.Platforms.Web, StringComparison.OrdinalIgnoreCase))
             {
                 exportOptionList.Add
@@ -268,6 +283,9 @@ namespace GodotTools.Export
             }
 
             var exportBackend = (ExportBackend)(int)GetOption("dotnet/export_backend");
+            Variant ilPrestrippingOption = GetOption("dotnet/dn2cpp/il_prestripping");
+            bool ilPrestripping = ilPrestrippingOption.VariantType == Variant.Type.Nil
+                || ilPrestrippingOption.AsBool();
             bool keepWebSymbols = platform == OS.Platforms.Web
                 && (bool)GetOption("dotnet/dn2cpp/keep_symbols");
             bool incrementalGcDefault = platform != OS.Platforms.Web
@@ -501,7 +519,7 @@ namespace GodotTools.Export
                         : null;
                     string? dn2CppContentsDir = dn2CppExporter?.BuildDropIn(publishOutputDir,
                         GodotSharpDirs.ProjectAssemblyName, buildConfig, runtimeIdentifier, arch,
-                        macOSDeploymentTarget, keepWebSymbols, incrementalGcDefault);
+                        macOSDeploymentTarget, keepWebSymbols, incrementalGcDefault, ilPrestripping);
 
                     // Where THIS slot's library landed, for the iOS tail below: it
                     // reads one {Assembly}.dylib per entry, so an entry has to be a

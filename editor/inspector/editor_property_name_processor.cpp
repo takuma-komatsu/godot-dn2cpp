@@ -193,6 +193,7 @@ EditorPropertyNameProcessor::EditorPropertyNameProcessor() {
 	capitalize_string_remaps["fs"] = "FS";
 	capitalize_string_remaps["fsr"] = "FSR";
 	capitalize_string_remaps["fxaa"] = "FXAA";
+	capitalize_string_remaps["gc"] = "GC";
 	capitalize_string_remaps["gdscript"] = "GDScript";
 	capitalize_string_remaps["ggx"] = "GGX";
 	capitalize_string_remaps["gi"] = "GI";
@@ -217,6 +218,7 @@ EditorPropertyNameProcessor::EditorPropertyNameProcessor() {
 	capitalize_string_remaps["ids"] = "IDs";
 	capitalize_string_remaps["igd"] = "IGD";
 	capitalize_string_remaps["ik"] = "IK";
+	capitalize_string_remaps["il"] = "IL";
 	capitalize_string_remaps["image@2x"] = "Image @2x";
 	capitalize_string_remaps["image@3x"] = "Image @3x";
 	capitalize_string_remaps["ime"] = "IME";
@@ -263,6 +265,7 @@ EditorPropertyNameProcessor::EditorPropertyNameProcessor() {
 	capitalize_string_remaps["png"] = "PNG";
 	capitalize_string_remaps["po2"] = "(Power of 2)"; // Unit.
 	capitalize_string_remaps["ppc64"] = "ppc64";
+	capitalize_string_remaps["prestripping"] = "Pre-stripping";
 	capitalize_string_remaps["pvrtc"] = "PVRTC";
 	capitalize_string_remaps["pvs"] = "PVS";
 	capitalize_string_remaps["rcodesign"] = "rcodesign";
