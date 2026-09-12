@@ -64,6 +64,7 @@ namespace GodotTools.Export
         /// </summary>
         private const string AndroidPlatform = "android-24";
         private const string AndroidAbi = "arm64-v8a";
+        private const string AndroidStl = "c++_static";
 
         /// <summary>
         /// Project setting (PackedStringArray) appended verbatim to the transpiler
@@ -713,9 +714,16 @@ namespace GodotTools.Export
             {
                 string config = WriteDeClangConfig(genDir, buildDir);
                 File.WriteAllText(Path.Combine(buildDir, "declang-identity.txt"), _declangIdentity!);
-                configureArgs.Add($"-DCMAKE_CXX_COMPILER:FILEPATH={CMakePath(_declangPath)}");
-                configureArgs.Add($"-DCMAKE_C_COMPILER:FILEPATH={CMakePath(_declangPath)}");
-                configureArgs.Add("-DCMAKE_C_COMPILER_ARG1=--driver-mode=gcc");
+                if (targetsAndroid)
+                {
+                    configureArgs.Add($"-DDN2CPP_DECLANG_COMPILER:FILEPATH={CMakePath(_declangPath)}");
+                }
+                else
+                {
+                    configureArgs.Add($"-DCMAKE_CXX_COMPILER:FILEPATH={CMakePath(_declangPath)}");
+                    configureArgs.Add($"-DCMAKE_C_COMPILER:FILEPATH={CMakePath(_declangPath)}");
+                    configureArgs.Add("-DCMAKE_C_COMPILER_ARG1=--driver-mode=gcc");
+                }
                 configureArgs.Add($"-DDN2CPP_DECLANG_CONFIG:FILEPATH={CMakePath(config)}");
                 configureArgs.Add("-DCMAKE_CXX_COMPILER_LAUNCHER=");
                 configureArgs.Add("-DCMAKE_C_COMPILER_LAUNCHER=");
@@ -749,11 +757,12 @@ namespace GodotTools.Export
             }
             else if (targetsAndroid)
             {
-                // The NDK ships its own toolchain file — it selects the bionic
-                // sysroot, the target triple and the API-level defines together,
-                // which is why nothing here spells a compiler.
-                configureArgs.Add("-DCMAKE_TOOLCHAIN_FILE=" +
-                    CMakePath(Path.Combine(_androidNdkRoot!, "build", "cmake", "android.toolchain.cmake")));
+                string toolchainFile = _declangPath is null
+                    ? Path.Combine(_androidNdkRoot!, "build", "cmake", "android.toolchain.cmake")
+                    : Path.Combine(_toolchain.RuntimeDir, "cmake", "android-declang.toolchain.cmake");
+                configureArgs.Add("-DCMAKE_TOOLCHAIN_FILE=" + CMakePath(toolchainFile));
+                configureArgs.Add("-DANDROID_NDK=" + CMakePath(_androidNdkRoot!));
+                configureArgs.Add($"-DANDROID_STL={AndroidStl}");
                 configureArgs.Add($"-DANDROID_ABI={AndroidAbi}");
                 configureArgs.Add($"-DANDROID_PLATFORM={AndroidPlatform}");
             }
@@ -1873,8 +1882,8 @@ namespace GodotTools.Export
         {
             if (string.IsNullOrEmpty(compiler))
                 return;
-            if (!OS.IsMacOS || _godotPlatform != OS.Platforms.MacOS)
-                throw new NotSupportedException("DeClang export currently requires a macOS host and macOS target of the same architecture.");
+            if (!OS.IsMacOS || (_godotPlatform != OS.Platforms.MacOS && _godotPlatform != OS.Platforms.Android))
+                throw new NotSupportedException("DeClang export requires a macOS host and either a macOS target of the same architecture or Android arm64-v8a.");
             if (string.IsNullOrEmpty(seed))
                 throw new NotSupportedException("Set a non-empty 'dotnet/dn2cpp/declang_seed' when DeClang is enabled.");
             if (!Path.IsPathFullyQualified(compiler) || !File.Exists(compiler))
@@ -1894,7 +1903,8 @@ namespace GodotTools.Export
             string helper = Path.Combine(_toolchain.RuntimeDir, "cmake", "declang_probe.cmake");
             if (!File.Exists(helper))
                 throw new NotSupportedException("This dn2cpp toolchain has no DeClang compatibility probe. Rebuild the toolchain bundle.");
-            string probeDir = Path.Combine(MonoDataDir, "dn2cpp", "declang-probe");
+            bool android = _godotPlatform == OS.Platforms.Android;
+            string probeDir = Path.Combine(MonoDataDir, "dn2cpp", android ? "declang-probe-android" : "declang-probe");
             string home = Path.Combine(probeDir, "disabled-home");
             Directory.CreateDirectory(Path.Combine(home, ".DeClang"));
             File.WriteAllText(Path.Combine(home, ".DeClang", "config.json"),
@@ -1902,14 +1912,23 @@ namespace GodotTools.Export
             _toolEnv!["DECLANG_HOME"] = home;
             _toolEnv["CCACHE_DISABLE"] = "1";
             _toolEnv["SCCACHE_DISABLE"] = "1";
-            RunTool(_cmakeExe, new List<string>
+            var probeArgs = new List<string>
             {
                 "-DCOMPILER=" + compiler,
                 "-DWORK_DIR=" + probeDir,
                 "-DNINJA_EXE=" + _ninjaExe,
                 "-DDEPLOYMENT_TARGET=" + (deploymentTarget ?? ""),
-                "-P", helper,
-            }, "checking DeClang compatibility before publish");
+            };
+            if (android)
+            {
+                probeArgs.Add("-DANDROID_NDK=" + _androidNdkRoot);
+                probeArgs.Add("-DANDROID_ABI=" + AndroidAbi);
+                probeArgs.Add("-DANDROID_PLATFORM=" + AndroidPlatform);
+                probeArgs.Add("-DANDROID_STL=" + AndroidStl);
+            }
+            probeArgs.Add("-P");
+            probeArgs.Add(helper);
+            RunTool(_cmakeExe, probeArgs, "checking DeClang compatibility before publish");
             string identityFile = Path.Combine(probeDir, "identity.txt");
             if (!File.Exists(identityFile))
                 throw new InvalidOperationException("The DeClang compatibility probe produced no compiler identity.");
