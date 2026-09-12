@@ -1882,8 +1882,9 @@ namespace GodotTools.Export
         {
             if (string.IsNullOrEmpty(compiler))
                 return;
-            if (!OS.IsMacOS || (_godotPlatform != OS.Platforms.MacOS && _godotPlatform != OS.Platforms.Android))
-                throw new NotSupportedException("DeClang export requires a macOS host and either a macOS target of the same architecture or Android arm64-v8a.");
+            if (!(OS.IsMacOS && _godotPlatform == OS.Platforms.MacOS)
+                && !((OS.IsMacOS || OS.IsWindows) && _godotPlatform == OS.Platforms.Android))
+                throw new NotSupportedException("DeClang export requires a native macOS target, or Android arm64-v8a from macOS or Windows.");
             if (string.IsNullOrEmpty(seed))
                 throw new NotSupportedException("Set a non-empty 'dotnet/dn2cpp/declang_seed' when DeClang is enabled.");
             if (!Path.IsPathFullyQualified(compiler) || !File.Exists(compiler))
