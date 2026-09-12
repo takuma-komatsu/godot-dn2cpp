@@ -136,7 +136,8 @@ namespace GodotTools.Export
                             { "hint_string", "Host Runtime,NativeAOT,dn2cpp" }
                         }
                     },
-                    { "default_value", (int)ExportBackend.HostRuntime }
+                    { "default_value", (int)ExportBackend.HostRuntime },
+                    { "update_visibility", true }
                 }
             );
 
@@ -154,6 +155,21 @@ namespace GodotTools.Export
                     { "default_value", true }
                 }
             );
+
+            foreach (string name in new[] { "declang_path", "declang_seed" })
+            {
+                exportOptionList.Add(new Godot.Collections.Dictionary
+                {
+                    { "option", new Godot.Collections.Dictionary
+                        {
+                            { "name", "dotnet/dn2cpp/" + name },
+                            { "type", (int)Variant.Type.String },
+                            { "hint", (int)(name == "declang_path" ? PropertyHint.GlobalFile : PropertyHint.None) },
+                        }
+                    },
+                    { "default_value", "" },
+                });
+            }
 
             if (platform.GetOsName().Equals(OS.Platforms.Web, StringComparison.OrdinalIgnoreCase))
             {
@@ -190,6 +206,23 @@ namespace GodotTools.Export
                 );
             }
             return exportOptionList;
+        }
+
+        public override bool _GetExportOptionVisibility(EditorExportPlatform platform, string option)
+        {
+            if (!option.StartsWith("dotnet/dn2cpp/", StringComparison.Ordinal))
+                return true;
+            if ((ExportBackend)(int)GetOption("dotnet/export_backend") != ExportBackend.Dn2Cpp)
+                return false;
+            if (option is "dotnet/dn2cpp/declang_path" or "dotnet/dn2cpp/declang_seed")
+            {
+                bool supportedHost = OS.IsMacOS || OS.IsWindows || Godot.OS.GetName() == "Linux";
+                return supportedHost
+                    && OS.PlatformFeatureMap.TryGetValue(platform.GetOsName(), out string? target)
+                    && target is OS.Platforms.MacOS or OS.Platforms.LinuxBSD or OS.Platforms.iOS
+                        or OS.Platforms.Android or OS.Platforms.Web;
+            }
+            return true;
         }
 
         private void AddExceptionMessage(EditorExportPlatform platform, Exception exception)
@@ -357,7 +390,11 @@ namespace GodotTools.Export
             // just resolved, not the features they came from: those are what the loop
             // below publishes and packages.
             using Dn2CppExporter? dn2CppExporter = exportBackend == ExportBackend.Dn2Cpp
-                ? Dn2CppExporter.Create(platform, publishConfig.Archs)
+                ? Dn2CppExporter.Create(platform, publishConfig.Archs,
+                    GetOption("dotnet/dn2cpp/declang_path").AsString(),
+                    GetOption("dotnet/dn2cpp/declang_seed").AsString(),
+                    platform == OS.Platforms.MacOS && publishConfig.Archs.Count == 1
+                        ? GetOption($"application/min_macos_version_{publishConfig.Archs.First()}").AsString() : null)
                 : null;
 
             // The NativeAOT backend is entirely a publish-time property; the native
@@ -481,6 +518,8 @@ namespace GodotTools.Export
                             Directory.CreateDirectory(publishOutputDir);
 
                         // Execute dotnet publish.
+                        if (dn2CppExporter is not null)
+                            GD.Print("dn2cpp: publishing the game assembly");
                         if (!BuildManager.PublishProjectBlocking(buildConfig, platform,
                                 runtimeIdentifier, publishOutputDir, includeDebugSymbols, publishProperties))
                         {
