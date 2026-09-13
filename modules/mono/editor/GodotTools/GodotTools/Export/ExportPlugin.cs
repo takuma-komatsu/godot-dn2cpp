@@ -141,20 +141,19 @@ namespace GodotTools.Export
                 }
             );
 
-            exportOptionList.Add
-            (
-                new Godot.Collections.Dictionary()
+            foreach (string name in new[] { "il_prestripping", "trim_reflection", "trim_godot_classes", "shared_generics" })
+            {
+                exportOptionList.Add(new Godot.Collections.Dictionary
                 {
-                    {
-                        "option", new Godot.Collections.Dictionary()
+                    { "option", new Godot.Collections.Dictionary
                         {
-                            { "name", "dotnet/dn2cpp/il_prestripping" },
-                            { "type", (int)Variant.Type.Bool }
+                            { "name", "dotnet/dn2cpp/" + name },
+                            { "type", (int)Variant.Type.Bool },
                         }
                     },
-                    { "default_value", true }
-                }
-            );
+                    { "default_value", true },
+                });
+            }
 
             foreach (string name in new[] { "declang_path", "declang_seed" })
             {
@@ -318,6 +317,11 @@ namespace GodotTools.Export
             Variant ilPrestrippingOption = GetOption("dotnet/dn2cpp/il_prestripping");
             bool ilPrestripping = ilPrestrippingOption.VariantType == Variant.Type.Nil
                 || ilPrestrippingOption.AsBool();
+            var optimizationOptions = new Dn2CppOptimizationOptions(name =>
+            {
+                Variant option = GetOption("dotnet/dn2cpp/" + name);
+                return option.VariantType == Variant.Type.Nil ? null : option.AsBool();
+            });
             bool keepWebSymbols = platform == OS.Platforms.Web
                 && (bool)GetOption("dotnet/dn2cpp/keep_symbols");
             bool incrementalGcDefault = platform != OS.Platforms.Web
@@ -557,7 +561,7 @@ namespace GodotTools.Export
                         : null;
                     string? dn2CppContentsDir = dn2CppExporter?.BuildDropIn(publishOutputDir,
                         GodotSharpDirs.ProjectAssemblyName, buildConfig, runtimeIdentifier, arch,
-                        macOSDeploymentTarget, keepWebSymbols, incrementalGcDefault, ilPrestripping);
+                        macOSDeploymentTarget, keepWebSymbols, incrementalGcDefault, ilPrestripping, optimizationOptions);
 
                     // Where THIS slot's library landed, for the iOS tail below: it
                     // reads one {Assembly}.dylib per entry, so an entry has to be a
