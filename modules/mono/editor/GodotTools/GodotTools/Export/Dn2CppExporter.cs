@@ -131,8 +131,8 @@ namespace GodotTools.Export
         private readonly Dn2CppMsvcEnvironment? _msvc;
 
         /// <summary>
-        /// The environment overlay every tool this export runs is given, a null
-        /// VALUE meaning "remove"; null when there is nothing to overlay.
+        /// The environment overlay every tool this export runs is given.
+        /// A null value removes a variable from the child environment.
         /// </summary>
         private readonly Dictionary<string, string?>? _toolEnv;
         private string? _declangPath;
@@ -1883,8 +1883,8 @@ namespace GodotTools.Export
             if (string.IsNullOrEmpty(compiler))
                 return;
             if (!(OS.IsMacOS && _godotPlatform == OS.Platforms.MacOS)
-                && !((OS.IsMacOS || OS.IsWindows) && _godotPlatform == OS.Platforms.Android))
-                throw new NotSupportedException("DeClang export requires a native macOS target, or Android arm64-v8a from macOS or Windows.");
+                && !((OS.IsMacOS || RuntimeInformation.IsOSPlatform(OSPlatform.Linux) || OS.IsWindows) && _godotPlatform == OS.Platforms.Android))
+                throw new NotSupportedException("DeClang export requires a native macOS target, or Android arm64-v8a from macOS, Linux, or Windows.");
             if (string.IsNullOrEmpty(seed))
                 throw new NotSupportedException("Set a non-empty 'dotnet/dn2cpp/declang_seed' when DeClang is enabled.");
             if (!Path.IsPathFullyQualified(compiler) || !File.Exists(compiler))
@@ -2283,11 +2283,9 @@ namespace GodotTools.Export
                 ("CMAKE_MAKE_PROGRAM", _ninjaExe, "build program"),
             };
 
-            // cmake never re-detects a compiler it has cached, so a tree configured
-            // by another toolset would take this import's INCLUDE and LIB. Asked
-            // only when the import ran: elsewhere the cached compiler is one cmake
-            // chose for itself (/usr/bin/c++ where the probe found clang++), and an
-            // unconditional test would recompile the whole runtime every export.
+            // Compare compilers only when the exporter selected one explicitly.
+            // Otherwise CMake's default may differ from the preflight's choice,
+            // and comparing them would discard a valid build on every export.
             if (_declangPath is not null)
                 pinned.Add(("CMAKE_CXX_COMPILER", _declangPath, "DeClang compiler"));
             if (_msvc is not null)

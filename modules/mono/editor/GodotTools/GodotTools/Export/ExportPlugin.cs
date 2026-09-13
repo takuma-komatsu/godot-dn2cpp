@@ -217,10 +217,9 @@ namespace GodotTools.Export
             if (option is "dotnet/dn2cpp/declang_path" or "dotnet/dn2cpp/declang_seed")
             {
                 bool supportedHost = OS.IsMacOS || OS.IsWindows || Godot.OS.GetName() == "Linux";
-                return supportedHost
-                    && OS.PlatformFeatureMap.TryGetValue(platform.GetOsName(), out string? target)
-                    && target is OS.Platforms.MacOS or OS.Platforms.LinuxBSD or OS.Platforms.iOS
-                        or OS.Platforms.Android or OS.Platforms.Web;
+                return OS.PlatformFeatureMap.TryGetValue(platform.GetOsName(), out string? target)
+                    && ((OS.IsMacOS && target == OS.Platforms.MacOS)
+                        || (supportedHost && target == OS.Platforms.Android));
             }
             return true;
         }
