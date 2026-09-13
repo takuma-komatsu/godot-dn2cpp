@@ -6,6 +6,9 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
+using System.Security.Cryptography;
+using Newtonsoft.Json.Linq;
 using Godot;
 using GodotTools.Internals;
 using GodotTools.Utils;
@@ -61,6 +64,7 @@ namespace GodotTools.Export
         /// </summary>
         private const string AndroidPlatform = "android-24";
         private const string AndroidAbi = "arm64-v8a";
+        private const string AndroidStl = "c++_static";
 
         /// <summary>
         /// Project setting (PackedStringArray) appended verbatim to the transpiler
@@ -127,10 +131,13 @@ namespace GodotTools.Export
         private readonly Dn2CppMsvcEnvironment? _msvc;
 
         /// <summary>
-        /// The environment overlay every tool this export runs is given, a null
-        /// VALUE meaning "remove"; null when there is nothing to overlay.
+        /// The environment overlay every tool this export runs is given.
+        /// A null value removes a variable from the child environment.
         /// </summary>
         private readonly Dictionary<string, string?>? _toolEnv;
+        private string? _declangPath;
+        private string? _declangSeed;
+        private string? _declangIdentity;
         private readonly string _logPath;
         private readonly StreamWriter _log;
         private readonly Queue<string> _logTail = new Queue<string>();
@@ -187,7 +194,7 @@ namespace GodotTools.Export
             _androidNdkRoot = androidNdkRoot;
             _emscripten = emscripten;
             _msvc = msvc;
-            _toolEnv = emscripten?.Env ?? msvc?.Env;
+            _toolEnv = emscripten?.Env ?? msvc?.Env ?? new Dictionary<string, string?>();
 
             string timestamp = DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
             string logsDir = Path.Combine(GodotSharpDirs.ProjectBaseOutputPath, "dn2cpp", "logs");
@@ -227,7 +234,8 @@ namespace GodotTools.Export
         /// preset's feature set. A feature naming an architecture does not make it
         /// a target, and a target is what this backend has to be able to build.
         /// </param>
-        public static Dn2CppExporter Create(string godotPlatform, IReadOnlyCollection<string> archs)
+        public static Dn2CppExporter Create(string godotPlatform, IReadOnlyCollection<string> archs,
+            string declangPath = "", string declangSeed = "", string? macOSDeploymentTarget = null)
         {
             if (godotPlatform == OS.Platforms.MacOS || godotPlatform == OS.Platforms.Windows
                 || godotPlatform == OS.Platforms.LinuxBSD)
@@ -532,8 +540,18 @@ namespace GodotTools.Export
                     "none is installed.");
             }
 
-            return new Dn2CppExporter(toolchain, cmakeExe!, ninjaExe!, godotPlatform, androidNdkRoot, emscripten,
+            var exporter = new Dn2CppExporter(toolchain, cmakeExe!, ninjaExe!, godotPlatform, androidNdkRoot, emscripten,
                 msvc);
+            try
+            {
+                exporter.InitializeDeClang(declangPath, declangSeed, macOSDeploymentTarget);
+                return exporter;
+            }
+            catch
+            {
+                exporter.Dispose();
+                throw;
+            }
         }
 
         /// <summary>
@@ -628,6 +646,11 @@ namespace GodotTools.Export
             string slot = $"{_godotPlatform}-{buildConfig}-{runtimeIdentifier}";
             // The transpile's own slot, one level coarser: see _transpiled.
             string ilSlot = $"{_godotPlatform}-{buildConfig}";
+            if (_declangPath is not null)
+            {
+                slot += "-declang";
+                ilSlot += "-declang";
+            }
             string ilDir = Path.Combine(workDir, "il", ilSlot);
             string genDir = Path.Combine(workDir, "gen", ilSlot);
             string buildDir = Path.Combine(workDir, "build", slot);
@@ -651,6 +674,12 @@ namespace GodotTools.Export
             // persistent cache was configured from is not part of it. So the cache
             // has to be asked whether it still describes this toolchain before the
             // configure trusts it.
+            if (_declangPath is not null && Directory.Exists(buildDir))
+            {
+                string identityFile = Path.Combine(buildDir, "declang-identity.txt");
+                if (!File.Exists(identityFile) || File.ReadAllText(identityFile) != _declangIdentity)
+                    RecreateDirectory(buildDir);
+            }
             ResetStaleBuildCache(buildDir, slot);
             // No CMAKE_BUILD_TYPE: runtime/CMakeLists.txt pins its own -O2 per
             // target, so a build type would only add -g (Debug) or -DNDEBUG
@@ -681,6 +710,25 @@ namespace GodotTools.Export
                 $"-DDN2CPP_APP_DIR={CMakePath(genDir)}",
                 $"-DDN2CPP_APP_NAME={targetName}",
             };
+            if (_declangPath is not null)
+            {
+                string config = WriteDeClangConfig(genDir, buildDir);
+                File.WriteAllText(Path.Combine(buildDir, "declang-identity.txt"), _declangIdentity!);
+                if (targetsAndroid)
+                {
+                    configureArgs.Add($"-DDN2CPP_DECLANG_COMPILER:FILEPATH={CMakePath(_declangPath)}");
+                }
+                else
+                {
+                    configureArgs.Add($"-DCMAKE_CXX_COMPILER:FILEPATH={CMakePath(_declangPath)}");
+                    configureArgs.Add($"-DCMAKE_C_COMPILER:FILEPATH={CMakePath(_declangPath)}");
+                    configureArgs.Add("-DCMAKE_C_COMPILER_ARG1=--driver-mode=gcc");
+                }
+                configureArgs.Add($"-DDN2CPP_DECLANG_CONFIG:FILEPATH={CMakePath(config)}");
+                configureArgs.Add("-DCMAKE_CXX_COMPILER_LAUNCHER=");
+                configureArgs.Add("-DCMAKE_C_COMPILER_LAUNCHER=");
+                configureArgs.Add("-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF");
+            }
             if (targetsIOS)
             {
                 // Retarget the host clang at the device or simulator SDK. The arch
@@ -709,11 +757,12 @@ namespace GodotTools.Export
             }
             else if (targetsAndroid)
             {
-                // The NDK ships its own toolchain file — it selects the bionic
-                // sysroot, the target triple and the API-level defines together,
-                // which is why nothing here spells a compiler.
-                configureArgs.Add("-DCMAKE_TOOLCHAIN_FILE=" +
-                    CMakePath(Path.Combine(_androidNdkRoot!, "build", "cmake", "android.toolchain.cmake")));
+                string toolchainFile = _declangPath is null
+                    ? Path.Combine(_androidNdkRoot!, "build", "cmake", "android.toolchain.cmake")
+                    : Path.Combine(_toolchain.RuntimeDir, "cmake", "android-declang.toolchain.cmake");
+                configureArgs.Add("-DCMAKE_TOOLCHAIN_FILE=" + CMakePath(toolchainFile));
+                configureArgs.Add("-DANDROID_NDK=" + CMakePath(_androidNdkRoot!));
+                configureArgs.Add($"-DANDROID_STL={AndroidStl}");
                 configureArgs.Add($"-DANDROID_ABI={AndroidAbi}");
                 configureArgs.Add($"-DANDROID_PLATFORM={AndroidPlatform}");
             }
@@ -758,6 +807,8 @@ namespace GodotTools.Export
             }
 
             RunTool(_cmakeExe, new List<string> { "--build", buildDir }, "compiling the drop-in library");
+            if (_declangPath is not null)
+                VerifyDeClangResults(buildDir, genDir);
 
             return StageBuiltLibrary(buildDir, stageDir, targetName, assemblyName,
                 targetsWindows, targetsLinux, targetsAndroid, targetsWeb);
@@ -881,6 +932,8 @@ namespace GodotTools.Export
                     transpileArgs.AddRange(extraArgs);
                 }
             }
+            if (_declangPath is not null)
+                transpileArgs.Add("--obfuscate");
             transpileArgs.Add("-o");
             transpileArgs.Add(genDir);
             RunTool(_toolchain.Dn2CppExe, transpileArgs, "transpiling the game assembly");
@@ -1825,6 +1878,146 @@ namespace GodotTools.Export
             return output;
         }
 
+        private void InitializeDeClang(string compiler, string seed, string? deploymentTarget)
+        {
+            if (string.IsNullOrEmpty(compiler))
+                return;
+            if (!(OS.IsMacOS && _godotPlatform == OS.Platforms.MacOS)
+                && !((OS.IsMacOS || RuntimeInformation.IsOSPlatform(OSPlatform.Linux) || OS.IsWindows) && _godotPlatform == OS.Platforms.Android))
+                throw new NotSupportedException("DeClang export requires a native macOS target, or Android arm64-v8a from macOS, Linux, or Windows.");
+            if (string.IsNullOrEmpty(seed))
+                throw new NotSupportedException("Set a non-empty 'dotnet/dn2cpp/declang_seed' when DeClang is enabled.");
+            if (!Path.IsPathFullyQualified(compiler) || !File.Exists(compiler))
+                throw new NotSupportedException("'dotnet/dn2cpp/declang_path' must select an existing compiler executable by absolute path; command arguments are not accepted.");
+            foreach (string variable in new[] { "CFLAGS", "CXXFLAGS", "LDFLAGS" })
+            {
+                string flags = System.Environment.GetEnvironmentVariable(variable) ?? "";
+                if (flags.Contains("-flto", StringComparison.Ordinal) || flags.Contains("-ipo", StringComparison.Ordinal))
+                    throw new NotSupportedException("DeClang export does not support LTO; remove the LTO flags from " + variable + ".");
+            }
+            foreach (string setting in new[] { ExtraLinkFlagsSetting, ExtraLinkLibsSetting })
+            {
+                if (GetPathListSetting(setting).Any(flag => flag.Contains("-flto", StringComparison.Ordinal)
+                        || flag.Contains("-ipo", StringComparison.Ordinal)))
+                    throw new NotSupportedException("DeClang export does not support LTO; remove the LTO flags from '" + setting + "'.");
+            }
+            string helper = Path.Combine(_toolchain.RuntimeDir, "cmake", "declang_probe.cmake");
+            if (!File.Exists(helper))
+                throw new NotSupportedException("This dn2cpp toolchain has no DeClang compatibility probe. Rebuild the toolchain bundle.");
+            bool android = _godotPlatform == OS.Platforms.Android;
+            string probeDir = Path.Combine(MonoDataDir, "dn2cpp", android ? "declang-probe-android" : "declang-probe");
+            string home = Path.Combine(probeDir, "disabled-home");
+            Directory.CreateDirectory(Path.Combine(home, ".DeClang"));
+            File.WriteAllText(Path.Combine(home, ".DeClang", "config.json"),
+                "{\"enable_obfuscation\":0,\"overall_obfuscation\":0}\n");
+            _toolEnv!["DECLANG_HOME"] = home;
+            _toolEnv["CCACHE_DISABLE"] = "1";
+            _toolEnv["SCCACHE_DISABLE"] = "1";
+            var probeArgs = new List<string>
+            {
+                "-DCOMPILER=" + compiler,
+                "-DWORK_DIR=" + probeDir,
+                "-DNINJA_EXE=" + _ninjaExe,
+                "-DDEPLOYMENT_TARGET=" + (deploymentTarget ?? ""),
+            };
+            if (android)
+            {
+                probeArgs.Add("-DANDROID_NDK=" + _androidNdkRoot);
+                probeArgs.Add("-DANDROID_ABI=" + AndroidAbi);
+                probeArgs.Add("-DANDROID_PLATFORM=" + AndroidPlatform);
+                probeArgs.Add("-DANDROID_STL=" + AndroidStl);
+            }
+            probeArgs.Add("-P");
+            probeArgs.Add(helper);
+            RunTool(_cmakeExe, probeArgs, "checking DeClang compatibility before publish");
+            string identityFile = Path.Combine(probeDir, "identity.txt");
+            if (!File.Exists(identityFile))
+                throw new InvalidOperationException("The DeClang compatibility probe produced no compiler identity.");
+            _declangIdentity = File.ReadAllText(identityFile);
+            _declangPath = compiler;
+            _declangSeed = seed;
+        }
+
+        private string WriteDeClangConfig(string genDir, string buildDir)
+        {
+            string manifest = Path.Combine(genDir, "obfuscation-targets.json");
+            JObject config = JObject.Parse(File.ReadAllText(manifest));
+            if ((int?)config["version"] != 1 || config["targets"] is not JArray targets || targets.Count == 0)
+                throw new InvalidOperationException("The obfuscation target manifest is invalid or contains no targets.");
+            foreach (JObject target in targets.Cast<JObject>())
+            {
+                string symbol = (string?)target["implementationSymbol"]
+                    ?? throw new InvalidOperationException("An obfuscation target has no implementation symbol.");
+                byte[] digest = SHA256.HashData(Encoding.UTF8.GetBytes(_declangSeed + "\n" + symbol));
+                target["seed"] = Convert.ToHexString(digest).ToLowerInvariant().Substring(0, 32);
+            }
+            string path = Path.Combine(buildDir, "declang-config.json");
+            string content = config.ToString(Newtonsoft.Json.Formatting.Indented) + "\n";
+            if (!File.Exists(path) || File.ReadAllText(path) != content)
+                File.WriteAllText(path, content);
+            return path;
+        }
+
+        private static void VerifyDeClangResults(string buildDir, string genDir)
+        {
+            JObject config = JObject.Parse(File.ReadAllText(Path.Combine(buildDir, "declang-config.json")));
+            if ((int?)config["version"] != 1 || config["targets"] is not JArray targets || targets.Count == 0)
+                throw new InvalidOperationException("The DeClang configuration contains no valid targets.");
+            var expected = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+            foreach (JObject target in targets.Cast<JObject>())
+            {
+                string cppFile = (string?)target["cppFile"]
+                    ?? throw new InvalidOperationException("A DeClang target has no translation unit.");
+                string pattern = (string?)target["symbolPattern"]
+                    ?? throw new InvalidOperationException("A DeClang target has no symbol pattern.");
+                if (Path.GetFileName(cppFile) != cppFile || !cppFile.EndsWith(".cpp", StringComparison.Ordinal))
+                    throw new InvalidOperationException("A DeClang target has an invalid translation unit path.");
+                if (!expected.TryGetValue(cppFile, out HashSet<string>? patterns))
+                    expected.Add(cppFile, patterns = new HashSet<string>(StringComparer.Ordinal));
+                patterns.Add(pattern);
+            }
+            string resultsDir = Path.Combine(buildDir, "declang", "results");
+            if (Directory.Exists(resultsDir))
+            {
+                foreach (string path in Directory.EnumerateFiles(resultsDir, "*.json"))
+                {
+                    string cppFile = Path.GetFileNameWithoutExtension(path);
+                    if (expected.ContainsKey(cppFile) || !File.Exists(Path.Combine(genDir, cppFile)))
+                        continue;
+                    JObject result = JObject.Parse(File.ReadAllText(path));
+                    if ((int?)result["version"] != 1 || (string?)result["cppFile"] != cppFile
+                        || result["flattenedSymbols"] is not JArray symbols || symbols.Count != 0)
+                        throw new InvalidOperationException($"DeClang reported an invalid result or flattened an unselected translation unit '{cppFile}'.");
+                }
+            }
+            foreach ((string cppFile, HashSet<string> patterns) in expected)
+            {
+                string path = Path.Combine(resultsDir, cppFile + ".json");
+                if (!File.Exists(path))
+                    throw new InvalidOperationException($"DeClang produced no application result for '{cppFile}'.");
+                JObject result = JObject.Parse(File.ReadAllText(path));
+                if ((int?)result["version"] != 1 || (string?)result["cppFile"] != cppFile
+                    || result["flattenedSymbols"] is not JArray symbols
+                    || symbols.Any(symbol => symbol.Type != JTokenType.String))
+                    throw new InvalidOperationException($"DeClang produced an invalid application result for '{cppFile}'.");
+                var matches = patterns.ToDictionary(pattern => pattern, _ => 0, StringComparer.Ordinal);
+                foreach (JToken token in symbols)
+                {
+                    string symbol = token.Value<string>()!;
+                    string[] matching = patterns.Where(pattern => Regex.IsMatch(symbol, pattern,
+                        RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1))).ToArray();
+                    if (matching.Length != 1)
+                        throw new InvalidOperationException($"DeClang reported an unexpected or ambiguous flattened symbol '{symbol}' in '{cppFile}'.");
+                    matches[matching[0]]++;
+                }
+                foreach ((string pattern, int count) in matches)
+                {
+                    if (count != 1)
+                        throw new InvalidOperationException($"DeClang must report exactly one successful flatten for '{pattern}' in '{cppFile}', but reported {count}.");
+                }
+            }
+        }
+
         private void RunTool(string exe, List<string> args, string step)
         {
             // The tail quotes the step that failed, so it starts at that step's
@@ -2090,11 +2283,11 @@ namespace GodotTools.Export
                 ("CMAKE_MAKE_PROGRAM", _ninjaExe, "build program"),
             };
 
-            // cmake never re-detects a compiler it has cached, so a tree configured
-            // by another toolset would take this import's INCLUDE and LIB. Asked
-            // only when the import ran: elsewhere the cached compiler is one cmake
-            // chose for itself (/usr/bin/c++ where the probe found clang++), and an
-            // unconditional test would recompile the whole runtime every export.
+            // Compare compilers only when the exporter selected one explicitly.
+            // Otherwise CMake's default may differ from the preflight's choice,
+            // and comparing them would discard a valid build on every export.
+            if (_declangPath is not null)
+                pinned.Add(("CMAKE_CXX_COMPILER", _declangPath, "DeClang compiler"));
             if (_msvc is not null)
                 pinned.Add(("CMAKE_CXX_COMPILER", _msvc.ClExe, "C++ compiler"));
 
