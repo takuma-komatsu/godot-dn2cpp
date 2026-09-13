@@ -569,7 +569,7 @@ namespace GodotTools.Export
         /// </remarks>
         public string BuildDropIn(string publishOutputDir, string assemblyName, string buildConfig,
             string runtimeIdentifier, string arch, string? macOSDeploymentTarget, bool keepWebSymbols,
-            bool incrementalGcDefault, bool ilPrestripping)
+            bool incrementalGcDefault, bool ilPrestripping, Dn2CppOptimizationOptions optimizationOptions)
         {
             // Create refuses any target set the backend cannot build, but it sees
             // one publish config and the caller loops over every architecture of
@@ -658,7 +658,7 @@ namespace GodotTools.Export
 
             if (_transpiled.Add(buildConfig))
             {
-                Transpile(publishOutputDir, assemblyName, ilDir, genDir, ilPrestripping);
+                Transpile(publishOutputDir, assemblyName, ilDir, genDir, ilPrestripping, optimizationOptions);
             }
             else
             {
@@ -819,7 +819,7 @@ namespace GodotTools.Export
         /// Runs once per build config — see <see cref="_transpiled"/>.
         /// </summary>
         private void Transpile(string publishOutputDir, string assemblyName, string ilDir, string genDir,
-            bool ilPrestripping)
+            bool ilPrestripping, Dn2CppOptimizationOptions optimizationOptions)
         {
             bool targetsWeb = _godotPlatform == OS.Platforms.Web;
             bool targetsStaticPInvoke = targetsWeb || _godotPlatform == OS.Platforms.iOS;
@@ -879,37 +879,7 @@ namespace GodotTools.Export
                 transpileArgs.Add("--direct-pinvoke");
                 transpileArgs.Add("*");
             }
-            // Web only, and not an optimization: without it the game does not load at all.
-            // The Web target links the generated C++ as an Emscripten wasm SIDE MODULE, and
-            // a side module's __wasm_apply_data_relocs — one i32.store per pointer that lives
-            // in static data — is a single function, which V8 caps at 7,654,321 bytes. The
-            // reflection member tables are ~75% of that function's body, and they carried it
-            // to 9,031,961 bytes: over the ceiling, so the browser refused to instantiate the
-            // module. Trimming them lands it around 4.9 MB. No other target has a per-function
-            // ceiling, and the trim is not free — it costs reflection over framework types the
-            // program was not seen to name (a stripped type throws a PlatformNotSupportedException
-            // naming itself and '--reflection-root', rather than answering an empty member list) —
-            // so nothing but the Web pays for it.
-            if (targetsWeb)
-            {
-                transpileArgs.Add("--trim-reflection");
-                // Second Web-only size lever (dn2cpp SZ-12), same relocation budget as
-                // above: the real GodotSharp's Godot.Constructors..cctor roots every
-                // engine-wrapper class through its 955 registry lambdas — ~69% of a
-                // small game's type-infos and thousands of never-called wrapper bodies,
-                // with methtab_Godot_Constructors___c alone contributing 5,730 of the
-                // side module's data relocations. Under this flag only the wrappers the
-                // game actually names stay; every other registry lambda is redirected
-                // to the nearest named ancestor's, so the 955-key registry (and its
-                // loud missing-name throw) is preserved and an unnamed class's engine
-                // object is wrapped as its nearest named ancestor — correct for every
-                // cast/is the game can express, with GetType().Name-style string
-                // reflection over never-named wrappers as the documented residue (the
-                // same constraint bucket as --trim-reflection; '--godot-class-root
-                // <Godot.Full.Name>' is the escape hatch for a class only ever named
-                // from data).
-                transpileArgs.Add("--trim-godot-classes");
-            }
+            optimizationOptions.AppendArguments(transpileArgs);
             if (!ilPrestripping)
             {
                 transpileArgs.Add("--no-ildiet");
