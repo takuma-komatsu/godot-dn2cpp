@@ -141,7 +141,7 @@ namespace GodotTools.Export
                 }
             );
 
-            foreach (string name in new[] { "il_prestripping", "trim_reflection", "trim_godot_classes", "shared_generics" })
+            foreach (string name in new[] { "il_prestripping", "trim_reflection", "trim_godot_classes", "shared_generics", "compress_metadata" })
             {
                 exportOptionList.Add(new Godot.Collections.Dictionary
                 {

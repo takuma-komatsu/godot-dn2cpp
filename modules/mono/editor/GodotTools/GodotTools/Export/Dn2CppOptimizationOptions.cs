@@ -8,6 +8,7 @@ namespace GodotTools.Export
         private readonly bool _trimReflection;
         private readonly bool _trimGodotClasses;
         private readonly bool _sharedGenerics;
+        private readonly bool _compressMetadata;
 
         public Dn2CppOptimizationOptions(Func<string, bool?> getOption)
         {
@@ -15,6 +16,7 @@ namespace GodotTools.Export
             _trimReflection = getOption("trim_reflection") ?? true;
             _trimGodotClasses = getOption("trim_godot_classes") ?? true;
             _sharedGenerics = getOption("shared_generics") ?? true;
+            _compressMetadata = getOption("compress_metadata") ?? true;
         }
 
         public void AppendArguments(List<string> arguments)
@@ -25,6 +27,8 @@ namespace GodotTools.Export
                 arguments.Add("--trim-godot-classes");
             if (!_sharedGenerics)
                 arguments.Add("--no-shared-generics");
+            if (!_compressMetadata)
+                arguments.Add("--no-metadata-compression");
         }
     }
 }
