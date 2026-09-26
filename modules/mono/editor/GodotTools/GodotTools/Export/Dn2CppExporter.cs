@@ -1181,8 +1181,8 @@ namespace GodotTools.Export
         }
 
         /// <summary>
-        /// The host C++ compiler cmake will pick for a native build, or
-        /// <see langword="null"/> when there is none on PATH. The order matches
+        /// The usable host C++ compiler cmake will pick for a native build, or
+        /// <see langword="null"/> when there is none. The order matches
         /// cmake's own default search under the Ninja generator, so what this
         /// finds is what the configure will use — asking for a compiler cmake
         /// would not have chosen turns a working host into a refusal, and missing
@@ -1195,7 +1195,17 @@ namespace GodotTools.Export
             // the PATH the configure runs under; OS.PathWhich can only see this
             // process's, and the editor's own environment is deliberately untouched.
             if (OS.IsWindows)
-                return msvc?.ClExe ?? OS.PathWhich("cl") ?? OS.PathWhich("clang++");
+            {
+                if (msvc is not null)
+                    return msvc.ClExe;
+
+                string? cl = OS.PathWhich("cl");
+                // A PATH entry alone cannot link without vcvars' LIB and INCLUDE.
+                if (cl is not null)
+                    return Dn2CppMsvcEnvironment.AlreadyInitialized() ? cl : null;
+
+                return OS.PathWhich("clang++");
+            }
 
             // clang++ first because it is cmake's own first choice and the only
             // compiler a macOS host has; g++ after it because on Linux it is the
