@@ -122,7 +122,11 @@ namespace GodotTools.Export
         /// <summary>How much of the tool output to quote back in an error message.</summary>
         private const int LogTailLines = 30;
 
+        private const string ToolchainContentHashFileName = "toolchain-content-hash.txt";
+        private const string NativeCompilerHashFileName = "native-compiler-hash.txt";
+
         private readonly Dn2CppToolchain _toolchain;
+        private readonly string? _toolchainContentHash;
         private readonly string _cmakeExe;
         private readonly string _ninjaExe;
         private readonly string _godotPlatform;
@@ -188,6 +192,7 @@ namespace GodotTools.Export
             string? androidNdkRoot, EmscriptenSdk? emscripten, Dn2CppMsvcEnvironment? msvc)
         {
             _toolchain = toolchain;
+            _toolchainContentHash = toolchain.GetManifestContentHash();
             _cmakeExe = cmakeExe;
             _ninjaExe = ninjaExe;
             _godotPlatform = godotPlatform;
@@ -809,6 +814,11 @@ namespace GodotTools.Export
             RunTool(_cmakeExe, new List<string> { "--build", buildDir }, "compiling the drop-in library");
             if (_declangPath is not null)
                 VerifyDeClangResults(buildDir, genDir);
+            WriteToolchainContentHash(buildDir);
+            string compilerHash = NativeCompilerHash(Path.Combine(buildDir, "CMakeCache.txt"))
+                ?? throw new InvalidOperationException("The native build did not record both configured compiler executables.");
+            File.WriteAllText(Path.Combine(buildDir, NativeCompilerHashFileName),
+                compilerHash + "\n");
 
             return StageBuiltLibrary(buildDir, stageDir, targetName, assemblyName,
                 targetsWindows, targetsLinux, targetsAndroid, targetsWeb);
@@ -2222,8 +2232,8 @@ namespace GodotTools.Export
 
         /// <summary>
         /// Discard a persistent build directory whose CMake cache was configured
-        /// from a different source tree, or by a different pair of build tools, than
-        /// this export is about to drive.
+        /// from a different source tree or toolchain bundle, or by different build
+        /// tools or native compilers, than this export is about to drive.
         /// </summary>
         /// <remarks>
         /// <para>A CMake cache records the source directory it was configured from,
@@ -2235,17 +2245,14 @@ namespace GodotTools.Export
         /// re-pointing <c>dotnet/export/dn2cpp_toolchain_path</c>, an editor whose
         /// <c>GodotSharp/Dn2Cpp</c> landed somewhere else than last time, a project
         /// directory copied off another machine.</para>
-        /// <para>The test is the cache's OWN declaration rather than the toolchain's
-        /// identity folded into the slot, and that is a deliberate choice in both
-        /// directions. The slot exists so the runtime and the vendored third-party
-        /// sources compile once per export target; keying it on anything that tracks
-        /// the toolchain's CONTENT — the bundle manifest's <c>content_hash</c>, say —
-        /// would throw that away every time dn2cpp is rebuilt, which is the whole
-        /// reason the directory persists. Keying it on the toolchain's PATH would
-        /// work, but it answers a narrower question: the cache's declaration also
-        /// catches a build tree that was moved rather than a toolchain, and it is
-        /// what cmake itself is going to compare against, so there is no second
-        /// notion of "same tree" to keep in agreement.</para>
+        /// <para>The cache's declarations cover paths, while the stamp written after
+        /// a successful native build covers content. Both are required: replacing the
+        /// bundle in place leaves <c>CMAKE_HOME_DIRECTORY</c> unchanged. The manifest
+        /// hash covers the prebuilt runtime keys, while a separate stamp covers the
+        /// configured compiler executables and their reported versions. A compiler
+        /// can change in place without changing the bundle. Retaining
+        /// <c>CMakeFiles/</c> would let CMake reuse its old compiler identity and
+        /// silently refuse the new bundle's runtime archives.</para>
         /// </remarks>
         private void ResetStaleBuildCache(string buildDir, string slot)
         {
@@ -2298,13 +2305,227 @@ namespace GodotTools.Export
                 if (cached[i] is { } value && SamePath(value, pinned[i].Expected))
                     continue;
 
-                GD.Print($"dn2cpp: stale build cache reset ({slot}): its CMakeCache.txt names " +
-                    $"'{cached[i] ?? "<nothing>"}' as the {pinned[i].What}, but this export uses " +
-                    $"'{pinned[i].Expected}' — recreating {buildDir}");
-                RecreateDirectory(buildDir);
+                ResetBuildDirectory(buildDir, slot,
+                    $"its CMakeCache.txt names '{cached[i] ?? "<nothing>"}' as the {pinned[i].What}, but " +
+                    $"this export uses '{pinned[i].Expected}'");
 
                 return;
             }
+
+            // manifest.json is informational and a bundle without one remains
+            // usable. The compiler stamp is independent of its content hash.
+            if (_toolchainContentHash is not null)
+            {
+                string identityFile = Path.Combine(buildDir, ToolchainContentHashFileName);
+                string? recordedToolchain = File.Exists(identityFile)
+                    ? File.ReadAllText(identityFile).Trim()
+                    : null;
+                if (!string.Equals(recordedToolchain, _toolchainContentHash, StringComparison.Ordinal))
+                {
+                    ResetBuildDirectory(buildDir, slot,
+                        $"its toolchain content hash is '{recordedToolchain ?? "<nothing>"}', but this export uses " +
+                        $"'{_toolchainContentHash}'");
+                    return;
+                }
+            }
+
+            string compilerHashFile = Path.Combine(buildDir, NativeCompilerHashFileName);
+            string? recordedCompiler = File.Exists(compilerHashFile)
+                ? File.ReadAllText(compilerHashFile).Trim()
+                : null;
+            if (string.IsNullOrEmpty(recordedCompiler))
+            {
+                ResetBuildDirectory(buildDir, slot, "native compiler identity is missing");
+                return;
+            }
+
+            string? currentCompiler = NativeCompilerHash(cacheFile);
+            if (currentCompiler is null || !string.Equals(recordedCompiler, currentCompiler, StringComparison.Ordinal))
+                ResetBuildDirectory(buildDir, slot, "native compiler identity changed");
+        }
+
+        /// <summary>
+        /// Fingerprint the compilers CMake actually configured, including wrappers
+        /// whose selected toolchain can change while the wrapper file stays put.
+        /// </summary>
+        private string? NativeCompilerHash(string cacheFile)
+        {
+            string? cachedCCompiler = null;
+            string? cachedCxxCompiler = null;
+            string? major = null;
+            string? minor = null;
+            string? patch = null;
+            foreach (string line in File.ReadLines(cacheFile))
+            {
+                int equals = line.IndexOf('=');
+                if (equals < 0)
+                    continue;
+                if (line.StartsWith("CMAKE_C_COMPILER:", StringComparison.Ordinal))
+                    cachedCCompiler = line.Substring(equals + 1).Trim();
+                else if (line.StartsWith("CMAKE_CXX_COMPILER:", StringComparison.Ordinal))
+                    cachedCxxCompiler = line.Substring(equals + 1).Trim();
+                else if (line.StartsWith("CMAKE_CACHE_MAJOR_VERSION:", StringComparison.Ordinal))
+                    major = line.Substring(equals + 1).Trim();
+                else if (line.StartsWith("CMAKE_CACHE_MINOR_VERSION:", StringComparison.Ordinal))
+                    minor = line.Substring(equals + 1).Trim();
+                else if (line.StartsWith("CMAKE_CACHE_PATCH_VERSION:", StringComparison.Ordinal))
+                    patch = line.Substring(equals + 1).Trim();
+            }
+
+            string? compilerForC = cachedCCompiler;
+            string? cxxCompiler = cachedCxxCompiler;
+            if (int.TryParse(major, NumberStyles.None, CultureInfo.InvariantCulture, out int majorNumber)
+                && int.TryParse(minor, NumberStyles.None, CultureInfo.InvariantCulture, out int minorNumber)
+                && int.TryParse(patch, NumberStyles.None, CultureInfo.InvariantCulture, out int patchNumber))
+            {
+                // Toolchain files can set compilers as normal variables, so they
+                // need not appear in CMakeCache.txt. CMake writes the effective
+                // choices here. Use the cache's version to ignore stale directories
+                // left by a CMake upgrade.
+                string cmakeVersion = $"{majorNumber}.{minorNumber}.{patchNumber}";
+                string compilerDir = Path.Combine(Path.GetDirectoryName(cacheFile)!, "CMakeFiles", cmakeVersion);
+                string cMetadata = Path.Combine(compilerDir, "CMakeCCompiler.cmake");
+                string cxxMetadata = Path.Combine(compilerDir, "CMakeCXXCompiler.cmake");
+                if (File.Exists(cMetadata) || File.Exists(cxxMetadata))
+                {
+                    // A partial compiler description is an interrupted configure,
+                    // not a reason to trust potentially stale cache entries.
+                    compilerForC = ReadConfiguredCompiler(cMetadata, "CMAKE_C_COMPILER");
+                    cxxCompiler = ReadConfiguredCompiler(cxxMetadata, "CMAKE_CXX_COMPILER");
+                }
+            }
+
+            if (string.IsNullOrEmpty(compilerForC) || string.IsNullOrEmpty(cxxCompiler))
+                return null;
+
+            string? cIdentity = CompilerIdentity(compilerForC);
+            string? cxxIdentity = CompilerIdentity(cxxCompiler);
+            if (cIdentity is null || cxxIdentity is null)
+                return null;
+
+            string identity = cIdentity + "\n" + cxxIdentity;
+            return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity)));
+        }
+
+        private static string? ReadConfiguredCompiler(string path, string name)
+        {
+            if (!File.Exists(path))
+                return null;
+
+            string prefix = "set(" + name + " \"";
+            foreach (string line in File.ReadLines(path))
+            {
+                if (!line.StartsWith(prefix, StringComparison.Ordinal))
+                    continue;
+
+                var value = new StringBuilder();
+                for (int i = prefix.Length; i < line.Length; i++)
+                {
+                    char current = line[i];
+                    if (current == '"')
+                        return line.Substring(i + 1).Trim() == ")" ? value.ToString() : null;
+                    if (current == '\\')
+                    {
+                        if (++i == line.Length)
+                            return null;
+                        current = line[i];
+                        current = current switch
+                        {
+                            'a' => '\a',
+                            'b' => '\b',
+                            'f' => '\f',
+                            'n' => '\n',
+                            'r' => '\r',
+                            't' => '\t',
+                            'v' => '\v',
+                            _ when !char.IsLetterOrDigit(current) => current,
+                            _ => '\0',
+                        };
+                        if (current == '\0')
+                            return null;
+                    }
+                    value.Append(current);
+                }
+                return null;
+            }
+            return null;
+        }
+
+        private string? CompilerIdentity(string compiler)
+        {
+            if (!File.Exists(compiler))
+                return null;
+
+            using var stream = File.OpenRead(compiler);
+            string executableHash = Convert.ToHexString(SHA256.HashData(stream));
+            bool isMsvc = string.Equals(Path.GetFileName(compiler), "cl.exe", StringComparison.OrdinalIgnoreCase);
+            string version = CaptureCompilerVersion(compiler, isMsvc ? "/Bv" : "-v");
+            return compiler + "\n" + executableHash + "\n" + version;
+        }
+
+        private string CaptureCompilerVersion(string compiler, string flag)
+        {
+            // cl /Bv reports its pass DLL versions before returning D8003 for the
+            // absent source file, so the exit code is recorded rather than required.
+            bool isBatch = OS.IsWindows &&
+                (compiler.EndsWith(".bat", StringComparison.OrdinalIgnoreCase)
+                    || compiler.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase));
+            using var process = new Process
+            {
+                StartInfo = new ProcessStartInfo(isBatch ? "cmd" : compiler)
+                {
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true,
+                },
+            };
+            if (isBatch)
+            {
+                process.StartInfo.ArgumentList.Add("/d");
+                process.StartInfo.ArgumentList.Add("/c");
+                process.StartInfo.ArgumentList.Add("call");
+                process.StartInfo.ArgumentList.Add(compiler);
+            }
+            process.StartInfo.ArgumentList.Add(flag);
+            if (_toolEnv is { } toolEnv)
+            {
+                foreach ((string name, string? value) in toolEnv)
+                {
+                    if (value is null)
+                        process.StartInfo.Environment.Remove(name);
+                    else
+                        process.StartInfo.Environment[name] = value;
+                }
+            }
+
+            process.Start();
+            var output = process.StandardOutput.ReadToEndAsync();
+            var errors = process.StandardError.ReadToEndAsync();
+            if (!process.WaitForExit(30_000))
+            {
+                process.Kill(entireProcessTree: true);
+                throw new InvalidOperationException($"The native compiler '{compiler}' did not answer its version probe.");
+            }
+            return $"{process.ExitCode}\n{output.GetAwaiter().GetResult()}\n{errors.GetAwaiter().GetResult()}";
+        }
+
+        /// <summary>
+        /// Record the bundle content that produced a successful native build.
+        /// </summary>
+        private void WriteToolchainContentHash(string buildDir)
+        {
+            string path = Path.Combine(buildDir, ToolchainContentHashFileName);
+            if (_toolchainContentHash is not null)
+                File.WriteAllText(path, _toolchainContentHash + "\n");
+            else
+                File.Delete(path);
+        }
+
+        private static void ResetBuildDirectory(string buildDir, string slot, string reason)
+        {
+            GD.Print($"dn2cpp: stale build cache reset ({slot}): {reason} — recreating {buildDir}");
+            RecreateDirectory(buildDir);
         }
 
         /// <summary>

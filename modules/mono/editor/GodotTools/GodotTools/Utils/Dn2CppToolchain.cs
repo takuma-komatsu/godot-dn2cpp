@@ -106,20 +106,20 @@ namespace GodotTools.Utils
         /// Whether an export to <paramref name="godotPlatform"/> needs the
         /// POSIX-flavour framework rather than the bundle's host one. The invariant:
         /// <b>on a Windows host, every target but Windows itself needs the POSIX
-        /// flavour</b> — so it is written as the complement of the one host-native
+        /// flavor</b> — so it is written as the complement of the one host-native
         /// target, never as a list of cross-targets. A list is a thing a newly
         /// supported platform can be forgotten from; iOS and macOS were already
         /// missing from one, and that was harmless only because
         /// <c>VerifyAppleSdk</c> happens to refuse an Apple target on a Windows host
         /// first — safety by accident of ordering, which the complement does not
         /// depend on.
-        /// <para>What the transpiler consumes is the CoreLib's IL, so the flavour
+        /// <para>What the transpiler consumes is the CoreLib's IL, so the flavor
         /// decides which native libraries the emitted P/Invokes name. A Windows
         /// framework names kernel32/ntdll (the real, unintercepted
         /// <c>FileStream</c>) and ole32 (COM, behind <c>Guid.NewGuid</c>); no
         /// cross-target sysroot — the NDK's, Emscripten's, an Apple SDK's — has any
         /// of them, and the failure lands in the linker naming a library rather than
-        /// a flavour. On a POSIX host the question does not arise: that framework's
+        /// a flavor. On a POSIX host the question does not arise: that framework's
         /// <c>Interop.Sys</c> is what bionic and Emscripten already answer, which is
         /// why this went unnoticed while the lane was macOS-only.</para>
         /// <para>The publish RID stays the HOST's either way — that is a deliberate
@@ -357,6 +357,33 @@ namespace GodotTools.Utils
             catch (Exception e) when (e is IOException or UnauthorizedAccessException)
             {
                 return $"manifest.json: unreadable ({e.Message})";
+            }
+        }
+
+        /// <summary>
+        /// The bundle content hash from <c>manifest.json</c>, or
+        /// <see langword="null"/> when the manifest is absent, unreadable,
+        /// malformed, or carries no non-empty hash.
+        /// </summary>
+        public string? GetManifestContentHash()
+        {
+            try
+            {
+                var parsed = Json.ParseString(System.IO.File.ReadAllText(ManifestPath));
+                if (parsed.VariantType != Variant.Type.Dictionary)
+                    return null;
+
+                var manifest = parsed.AsGodotDictionary();
+                if (!manifest.TryGetValue("content_hash", out Variant value))
+                    return null;
+
+                string field = value.AsString();
+
+                return field.Length > 0 ? field : null;
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                return null;
             }
         }
 
