@@ -141,6 +141,19 @@ namespace GodotTools.Export
                 }
             );
 
+            exportOptionList.Add(new Godot.Collections.Dictionary
+            {
+                { "option", new Godot.Collections.Dictionary
+                    {
+                        { "name", "dotnet/dn2cpp/stripping_level" },
+                        { "type", (int)Variant.Type.Int },
+                        { "hint", (int)PropertyHint.Enum },
+                        { "hint_string", "High,Medium" },
+                    }
+                },
+                { "default_value", 0 },
+            });
+
             foreach (string name in new[] { "il_prestripping", "trim_reflection", "trim_godot_classes", "shared_generics", "compress_metadata" })
             {
                 exportOptionList.Add(new Godot.Collections.Dictionary
@@ -317,11 +330,13 @@ namespace GodotTools.Export
             Variant ilPrestrippingOption = GetOption("dotnet/dn2cpp/il_prestripping");
             bool ilPrestripping = ilPrestrippingOption.VariantType == Variant.Type.Nil
                 || ilPrestrippingOption.AsBool();
+            Variant strippingLevelOption = GetOption("dotnet/dn2cpp/stripping_level");
+            int strippingLevel = strippingLevelOption.VariantType == Variant.Type.Nil ? 0 : (int)strippingLevelOption;
             var optimizationOptions = new Dn2CppOptimizationOptions(name =>
             {
                 Variant option = GetOption("dotnet/dn2cpp/" + name);
                 return option.VariantType == Variant.Type.Nil ? null : option.AsBool();
-            });
+            }, strippingLevel);
             bool keepWebSymbols = platform == OS.Platforms.Web
                 && (bool)GetOption("dotnet/dn2cpp/keep_symbols");
             bool incrementalGcDefault = platform != OS.Platforms.Web
