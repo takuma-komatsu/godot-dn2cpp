@@ -67,7 +67,7 @@ namespace GodotTools.Export
         private const string AndroidStl = "c++_static";
 
         /// <summary>
-        /// Project setting (PackedStringArray) appended verbatim to the transpiler
+        /// Project setting (PackedStringArray) appended to the transpiler
         /// invocation, e.g. ["--direct-pinvoke", "my_native_lib"] for a game
         /// binding an external native library through a referenced assembly.
         /// </summary>
@@ -909,7 +909,7 @@ namespace GodotTools.Export
                 if (extraArgs.Length > 0)
                 {
                     GD.Print($"dn2cpp: extra transpile args (project setting): {string.Join(' ', extraArgs)}");
-                    transpileArgs.AddRange(extraArgs);
+                    optimizationOptions.AppendExtraArguments(transpileArgs, extraArgs);
                 }
             }
             if (_declangPath is not null)
