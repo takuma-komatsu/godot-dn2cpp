@@ -574,7 +574,8 @@ namespace GodotTools.Export
         /// </remarks>
         public string BuildDropIn(string publishOutputDir, string assemblyName, string buildConfig,
             string runtimeIdentifier, string arch, string? macOSDeploymentTarget, bool keepWebSymbols,
-            bool incrementalGcDefault, bool ilPrestripping, Dn2CppOptimizationOptions optimizationOptions)
+            bool incrementalGcDefault, bool ilPrestripping, Dn2CppOptimizationOptions optimizationOptions,
+            string[] extraTranspileArgs, string[] extraILDietArgs)
         {
             // Create refuses any target set the backend cannot build, but it sees
             // one publish config and the caller loops over every architecture of
@@ -663,7 +664,8 @@ namespace GodotTools.Export
 
             if (_transpiled.Add(buildConfig))
             {
-                Transpile(publishOutputDir, assemblyName, ilDir, genDir, ilPrestripping, optimizationOptions);
+                Transpile(publishOutputDir, assemblyName, ilDir, genDir, ilPrestripping, optimizationOptions,
+                    extraTranspileArgs, extraILDietArgs);
             }
             else
             {
@@ -829,7 +831,8 @@ namespace GodotTools.Export
         /// Runs once per build config — see <see cref="_transpiled"/>.
         /// </summary>
         private void Transpile(string publishOutputDir, string assemblyName, string ilDir, string genDir,
-            bool ilPrestripping, Dn2CppOptimizationOptions optimizationOptions)
+            bool ilPrestripping, Dn2CppOptimizationOptions optimizationOptions,
+            string[] extraTranspileArgs, string[] extraILDietArgs)
         {
             bool targetsWeb = _godotPlatform == OS.Platforms.Web;
             bool targetsStaticPInvoke = targetsWeb || _godotPlatform == OS.Platforms.iOS;
@@ -894,15 +897,7 @@ namespace GodotTools.Export
             {
                 transpileArgs.Add("--no-ildiet");
             }
-            // Project-declared extra transpiler arguments (the
-            // "dotnet/dn2cpp/extra_transpile_args" project setting, a
-            // PackedStringArray): the route for a per-project flag the exporter has
-            // no dedicated knob for — e.g. "--direct-pinvoke my_native_lib" when
-            // the game binds an external native library through a referenced
-            // binding assembly.
-            // A PROJECT setting, deliberately not an environment variable: the flags
-            // change the C++ a successful transpile emits, and they belong to the
-            // game, versioned with it, visible in its project.godot.
+            // Project defaults precede preset arguments; each array entry is one argv token.
             if (ProjectSettings.HasSetting(ExtraTranspileArgsSetting))
             {
                 string[] extraArgs = ProjectSettings.GetSetting(ExtraTranspileArgsSetting).AsStringArray();
@@ -911,6 +906,12 @@ namespace GodotTools.Export
                     GD.Print($"dn2cpp: extra transpile args (project setting): {string.Join(' ', extraArgs)}");
                     optimizationOptions.AppendExtraArguments(transpileArgs, extraArgs);
                 }
+            }
+            optimizationOptions.AppendExtraArguments(transpileArgs, extraTranspileArgs);
+            foreach (string argument in extraILDietArgs)
+            {
+                transpileArgs.Add("--ildiet-arg");
+                transpileArgs.Add(argument);
             }
             if (_declangPath is not null)
                 transpileArgs.Add("--obfuscate");

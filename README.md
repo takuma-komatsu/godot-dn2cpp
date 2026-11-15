@@ -26,6 +26,16 @@ Prebuilt binaries (macOS and Windows editors, macOS and Web export templates)
 are on the [Releases](../../releases) page. The transpiler itself lives in
 [takuma-komatsu/dn2cpp](https://github.com/takuma-komatsu/dn2cpp).
 
+With the dn2cpp export backend selected, **Extra Transpile Args** and
+**Extra ILDiet Args** accept additional CLI arguments per export preset. Enter
+one argument per array element, keeping a flag and its value separate; paths
+with spaces need no extra quotes. Preset transpiler arguments follow the
+project's `dotnet/dn2cpp/extra_transpile_args`. ILDiet runs in `--request` mode:
+use its field for companion options such as `--work-budget`, and the transpiler
+field for inputs and preservation rules. See the
+[export settings design](https://github.com/takuma-komatsu/dn2cpp/blob/main/docs/EDITOR-EXPORT-DESIGN.md#3-export-ux-in-the-fork)
+for the option contract and toolchain requirements.
+
 This fork is not intended as a pull request to upstream Godot. Everything below
 is the stock Godot README, unchanged.
 
