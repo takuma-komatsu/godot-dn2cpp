@@ -168,6 +168,20 @@ namespace GodotTools.Export
                 });
             }
 
+            foreach (string name in new[] { "extra_transpile_args", "extra_ildiet_args" })
+            {
+                exportOptionList.Add(new Godot.Collections.Dictionary
+                {
+                    { "option", new Godot.Collections.Dictionary
+                        {
+                            { "name", "dotnet/dn2cpp/" + name },
+                            { "type", (int)Variant.Type.PackedStringArray },
+                        }
+                    },
+                    { "default_value", Array.Empty<string>() },
+                });
+            }
+
             foreach (string name in new[] { "declang_path", "declang_seed" })
             {
                 exportOptionList.Add(new Godot.Collections.Dictionary
@@ -337,6 +351,12 @@ namespace GodotTools.Export
                 Variant option = GetOption("dotnet/dn2cpp/" + name);
                 return option.VariantType == Variant.Type.Nil ? null : option.AsBool();
             }, strippingLevel);
+            Variant extraTranspileOption = GetOption("dotnet/dn2cpp/extra_transpile_args");
+            string[] extraTranspileArgs = extraTranspileOption.VariantType == Variant.Type.Nil
+                ? Array.Empty<string>() : extraTranspileOption.AsStringArray();
+            Variant extraILDietOption = GetOption("dotnet/dn2cpp/extra_ildiet_args");
+            string[] extraILDietArgs = extraILDietOption.VariantType == Variant.Type.Nil
+                ? Array.Empty<string>() : extraILDietOption.AsStringArray();
             bool keepWebSymbols = platform == OS.Platforms.Web
                 && (bool)GetOption("dotnet/dn2cpp/keep_symbols");
             bool incrementalGcDefault = platform != OS.Platforms.Web
@@ -576,7 +596,8 @@ namespace GodotTools.Export
                         : null;
                     string? dn2CppContentsDir = dn2CppExporter?.BuildDropIn(publishOutputDir,
                         GodotSharpDirs.ProjectAssemblyName, buildConfig, runtimeIdentifier, arch,
-                        macOSDeploymentTarget, keepWebSymbols, incrementalGcDefault, ilPrestripping, optimizationOptions);
+                        macOSDeploymentTarget, keepWebSymbols, incrementalGcDefault, ilPrestripping, optimizationOptions,
+                        extraTranspileArgs, extraILDietArgs);
 
                     // Where THIS slot's library landed, for the iOS tail below: it
                     // reads one {Assembly}.dylib per entry, so an entry has to be a
