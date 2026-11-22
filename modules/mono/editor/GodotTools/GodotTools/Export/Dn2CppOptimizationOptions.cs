@@ -11,7 +11,7 @@ namespace GodotTools.Export
         private readonly bool _compressMetadata;
         private readonly string _strippingLevel;
 
-        public Dn2CppOptimizationOptions(Func<string, bool?> getOption, int strippingLevel = 0)
+        public Dn2CppOptimizationOptions(Func<string, bool?> getOption, long strippingLevel = 0)
         {
             // Existing presets lack these keys and must inherit the export defaults.
             _trimReflection = getOption("trim_reflection") ?? true;
@@ -22,7 +22,8 @@ namespace GodotTools.Export
             {
                 0 => "high",
                 1 => "medium",
-                _ => throw new InvalidOperationException("dn2cpp: Stripping Level must be High or Medium."),
+                2 => "low",
+                _ => throw new InvalidOperationException("dn2cpp: Stripping Level must be High, Medium or Low."),
             };
         }
 
