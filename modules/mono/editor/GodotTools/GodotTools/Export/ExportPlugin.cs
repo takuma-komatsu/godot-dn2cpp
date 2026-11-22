@@ -148,7 +148,7 @@ namespace GodotTools.Export
                         { "name", "dotnet/dn2cpp/stripping_level" },
                         { "type", (int)Variant.Type.Int },
                         { "hint", (int)PropertyHint.Enum },
-                        { "hint_string", "High,Medium" },
+                        { "hint_string", "High,Medium,Low" },
                     }
                 },
                 { "default_value", 0 },
@@ -345,7 +345,8 @@ namespace GodotTools.Export
             bool ilPrestripping = ilPrestrippingOption.VariantType == Variant.Type.Nil
                 || ilPrestrippingOption.AsBool();
             Variant strippingLevelOption = GetOption("dotnet/dn2cpp/stripping_level");
-            int strippingLevel = strippingLevelOption.VariantType == Variant.Type.Nil ? 0 : (int)strippingLevelOption;
+            // Variant integers are 64-bit; truncation could turn an invalid value into a valid choice.
+            long strippingLevel = strippingLevelOption.VariantType == Variant.Type.Nil ? 0 : (long)strippingLevelOption;
             var optimizationOptions = new Dn2CppOptimizationOptions(name =>
             {
                 Variant option = GetOption("dotnet/dn2cpp/" + name);
